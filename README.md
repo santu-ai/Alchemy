@@ -29,6 +29,8 @@ open -a Ollama   # 确保 Ollama 在运行
 pnpm dev         # 打开 http://localhost:43127
 ```
 
+如果 Homebrew 卡在 `Downloading Homebrew API data`，多半是网络问题，可以换成[清华镜像](https://mirrors.tuna.tsinghua.edu.cn/help/homebrew/)。
+
 随时体检开发环境（只读，不会修改任何东西）：
 
 ```bash
