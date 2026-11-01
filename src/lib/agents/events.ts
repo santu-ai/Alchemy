@@ -7,9 +7,11 @@ export interface LogEvent {
 
 type Json = Record<string, unknown>;
 
+/** 判断是否为非 null 的普通对象（排除数组）。 */
 const isObject = (value: unknown): value is Json =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** 从字符串或 content 数组里抽出可展示的纯文本。 */
 function contentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
