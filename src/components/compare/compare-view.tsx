@@ -34,7 +34,8 @@ const PROMPTS = [
   "一个笼子里有鸡和兔共 35 只，脚共 94 只，鸡和兔各几只？请写出推理过程。",
 ];
 
-const emptyLane = (model?: string): Lane => ({ key: uid(), model, content: "", thinking: "", running: false });
+const emptyLane = (key: string = uid()): Lane => ({ key, content: "", thinking: "", running: false });
+const INITIAL_LANES = [emptyLane("lane-a"), emptyLane("lane-b")];
 
 function best(lanes: Lane[], pick: (s: GenerationStats) => number | undefined, mode: "min" | "max") {
   let winner: string | undefined;
@@ -53,7 +54,7 @@ function best(lanes: Lane[], pick: (s: GenerationStats) => number | undefined, m
 export function CompareView() {
   const { data, loading } = useModels();
   const models = useMemo(() => data?.models ?? [], [data]);
-  const [lanes, setLanes] = useState<Lane[]>(() => [emptyLane(), emptyLane()]);
+  const [lanes, setLanes] = useState<Lane[]>(INITIAL_LANES);
   const [prompt, setPrompt] = useState("");
   const [system, setSystem] = useState("");
   const controllers = useRef(new Map<string, AbortController>());
