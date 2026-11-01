@@ -1,7 +1,7 @@
 import { connection } from "next/server";
 
 import { listCloudModels } from "@/lib/server/cloud-models";
-import { listOllamaModels } from "@/lib/server/ollama";
+import { enrichOllamaModels, listOllamaModels } from "@/lib/server/ollama";
 import { getProviders, publicProvider } from "@/lib/server/providers";
 import type { ModelInfo, ModelsResponse } from "@/lib/types";
 
@@ -15,7 +15,7 @@ export async function GET() {
       .filter((p) => p.configured)
       .map(async (provider): Promise<ModelInfo[]> => {
         try {
-          if (provider.kind === "ollama") return await listOllamaModels();
+          if (provider.kind === "ollama") return await enrichOllamaModels(await listOllamaModels());
           if (provider.kind === "demo") {
             return [
               {

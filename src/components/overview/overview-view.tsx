@@ -23,7 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { sessionsStore } from "@/lib/client/chat-store";
 import { useHydrated, useLocalStore } from "@/lib/client/local-store";
 import { useModels, useStatus } from "@/lib/client/use-api";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatContext, formatGpu } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const ACTIONS = [
@@ -36,26 +36,26 @@ const DIRECTIONS = [
   {
     icon: LibraryIcon,
     title: "个人知识库（RAG）",
-    text: "用 nomic-embed-text 把文档转成向量，再让 qwen3 基于检索结果回答。适合整理笔记、论文、公司资料。",
-    models: ["nomic-embed-text", "qwen3:14b"],
+    text: "用 nomic-embed-text 做向量。回答模型用 gpt-oss:20b 或 gemma4:26b。先把上下文放在 32k，确认速度再加大。",
+    models: ["nomic-embed-text", "gpt-oss:20b"],
   },
   {
     icon: BotIcon,
-    title: "Agent 与工具调用",
-    text: "让模型调用搜索、读写文件、执行代码。先在本地用 gpt-oss 或 qwen3 验证流程，再换成云端强模型上线。",
-    models: ["gpt-oss:20b", "qwen3:30b"],
+    title: "工具调用",
+    text: "对话参数里打开本地工具，让模型读取你附上的文本或回答当前时间。对比页可以把这套参数导出成接口。",
+    models: ["gpt-oss:20b", "gemma4:26b"],
   },
   {
     icon: CodeIcon,
-    title: "编程助手",
-    text: "本地代码模型离线可用、不泄露代码。用来解释代码、写测试、生成脚本。",
-    models: ["qwen2.5-coder:14b"],
+    title: "看图与编程",
+    text: "gemma4 和 qwen3.5 能直接看图片。编程先用 gpt-oss 的工具调用试一轮，再决定要不要换专门的代码模型。",
+    models: ["gemma4:12b", "qwen3.5:4b"],
   },
   {
     icon: RocketIcon,
     title: "AI 产品原型",
-    text: "先在「模型对比」里找到效果与成本平衡的模型，再用 Next.js 或 Python 做出第一个可用版本。",
-    models: ["qwen3:8b", "云端 API"],
+    text: "在「模型对比」里固定上下文和思考档，标出更好的一栏，再导出一段 Route Handler。",
+    models: ["gpt-oss:20b", "云端 API"],
   },
 ];
 
@@ -122,7 +122,7 @@ export function OverviewView() {
     {
       done: localChat.length > 0,
       title: "下载第一个本地模型",
-      text: "推荐 qwen3:8b（约 5 GB），中文好、速度快。",
+      text: "这台 36 GB 的机器建议先下 gpt-oss:20b（约 14 GB）。",
       href: "/models",
     },
     {
@@ -174,7 +174,17 @@ export function OverviewView() {
             label="已加载到内存"
             loading={loading}
             value={`${ollama?.running.length ?? 0} 个`}
-            hint={runningBytes ? `占用约 ${formatBytes(runningBytes)}` : "空闲 5 分钟后自动卸载"}
+            hint={
+              ollama?.running.length
+                ? ollama.running
+                    .map((model) =>
+                      [model.name, formatContext(model.contextLength), formatGpu(model.gpuPercent)].filter(Boolean).join(" · "),
+                    )
+                    .join("；")
+                : runningBytes
+                  ? `占用约 ${formatBytes(runningBytes)}`
+                  : "空闲 5 分钟后自动卸载"
+            }
           />
           <StatCard
             icon={CloudIcon}
@@ -271,10 +281,10 @@ export function OverviewView() {
               <span className="font-medium text-foreground">16 GB：</span>7B–8B 模型流畅
             </p>
             <p>
-              <span className="font-medium text-foreground">32–36 GB：</span>14B 流畅，30B 量化可用
+              <span className="font-medium text-foreground">32–36 GB：</span>混合专家优先，例如 gpt-oss 20B、Gemma 4 26B。GPU 大约能用 27 GB，默认上下文 32k
             </p>
             <p>
-              <span className="font-medium text-foreground">64 GB 以上：</span>可以尝试 70B 量化
+              <span className="font-medium text-foreground">64 GB 以上：</span>可以尝试更大的稠密模型，或把上下文开过 32k
             </p>
           </div>
         </section>

@@ -20,6 +20,11 @@ export interface ModelInfo {
   quantization?: string;
   family?: string;
   modifiedAt?: string;
+  /** 模型自己声明的最大上下文，不是这次实际加载的长度。 */
+  contextLength?: number;
+  capabilities?: string[];
+  thinkingValues?: Array<string | boolean>;
+  thinkingDefault?: string | boolean;
 }
 
 export interface ModelsResponse {
@@ -33,6 +38,15 @@ export interface RunningModel {
   sizeBytes: number;
   vramBytes: number;
   expiresAt?: string;
+  /** 这次加载实际分配的上下文。 */
+  contextLength?: number;
+  /** 权重放在 GPU 上的比例，0–100。 */
+  gpuPercent?: number;
+}
+
+export interface ChatAttachment {
+  name: string;
+  content: string;
 }
 
 export interface StatusResponse {
@@ -47,11 +61,15 @@ export interface StatusResponse {
 }
 
 export interface ChatMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
+  /** data URL 或纯 base64。只出现在用户消息上。 */
+  images?: string[];
+  attachments?: ChatAttachment[];
 }
 
-export type ThinkMode = "default" | "on" | "off";
+/** `default` 不传；`on` / `off` 是布尔；其余字符串是模型自己的思考档，例如 low。 */
+export type ThinkMode = "default" | "on" | "off" | "low" | "medium" | "high" | "max" | (string & {});
 
 export interface ChatRequest {
   model: string;
@@ -59,6 +77,16 @@ export interface ChatRequest {
   system?: string;
   temperature?: number;
   think?: ThinkMode;
+  /** 只对 Ollama 生效。 */
+  numCtx?: number;
+  /** 只对 Ollama 生效，启用本机的时间和附件工具。 */
+  tools?: boolean;
+}
+
+export interface ToolTrace {
+  name: string;
+  arguments?: unknown;
+  result: string;
 }
 
 export interface GenerationStats {
@@ -72,5 +100,6 @@ export interface GenerationStats {
 export type StreamEvent =
   | { type: "delta"; content: string }
   | { type: "thinking"; content: string }
+  | { type: "tool"; trace: ToolTrace }
   | { type: "done"; stats: GenerationStats }
   | { type: "error"; message: string };

@@ -1,8 +1,11 @@
 import "server-only";
 
-import type { ChatRequest, GenerationStats, StreamEvent } from "@/lib/types";
+import { ensureDataUrl, mediaTypeOf, stripDataUrl } from "@/lib/images";
+import { thinkPayload } from "@/lib/think";
+import type { ChatMessage, ChatRequest, GenerationStats, StreamEvent } from "@/lib/types";
 import { ollamaError, ollamaFetch } from "./ollama";
 import { getProvider, splitModelId, type ProviderConfig } from "./providers";
+import { callArguments, callName, LAB_TOOLS, runLabTool, type ToolCall } from "./tools";
 
 type Emit = (event: StreamEvent) => void;
 
@@ -73,10 +76,29 @@ async function* readSse(body: ReadableStream<Uint8Array>) {
   }
 }
 
-function withSystem(req: ChatRequest) {
+function withSystem(req: ChatRequest): ChatMessage[] {
   const system = req.system?.trim();
   const messages = req.messages.filter((m) => m.role !== "system");
-  return system ? [{ role: "system" as const, content: system }, ...messages] : messages;
+  return system ? [{ role: "system", content: system }, ...messages] : messages;
+}
+
+function inlineAttachments(messages: ChatMessage[]) {
+  return messages.map((message) => {
+    if (!message.attachments?.length) return message;
+    const block = message.attachments.map((file) => `【附件 ${file.name}】\n${file.content}`).join("\n\n");
+    return { ...message, content: `${message.content}\n\n${block}`.trim() };
+  });
+}
+
+function noteAttachments(messages: ChatMessage[]) {
+  return messages.map((message) => {
+    if (!message.attachments?.length) return message;
+    const names = message.attachments.map((file) => file.name).join("、");
+    return {
+      ...message,
+      content: `${message.content}\n\n用户附上了文本文件：${names}。需要内容时调用 read_attachment。`.trim(),
+    };
+  });
 }
 
 async function errorText(res: Response) {
@@ -90,59 +112,114 @@ async function errorText(res: Response) {
   return text.slice(0, 300) || `请求失败（${res.status}）`;
 }
 
-async function runOllama(name: string, req: ChatRequest, signal: AbortSignal, t: Tracker) {
-  const body: Record<string, unknown> = { model: name, messages: withSystem(req), stream: true };
-  if (req.temperature !== undefined) body.options = { temperature: req.temperature };
-  if (req.think === "on") body.think = true;
-  if (req.think === "off") body.think = false;
-
-  const res = await ollamaFetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
+function ollamaMessages(messages: ChatMessage[]) {
+  return messages.map((message) => {
+    const next: Record<string, unknown> = { role: message.role, content: message.content };
+    if (message.role === "user" && message.images?.length) next.images = message.images.map(stripDataUrl);
+    return next;
   });
-  if (!res.ok || !res.body) throw new Error(await ollamaError(res));
+}
 
-  for await (const line of readLines(res.body)) {
-    const chunk = JSON.parse(line) as {
-      error?: string;
-      message?: { content?: string; thinking?: string };
-      done?: boolean;
-      eval_count?: number;
-      eval_duration?: number;
-      prompt_eval_count?: number;
-    };
-    if (chunk.error) throw new Error(chunk.error);
-    if (chunk.message?.thinking) {
-      t.mark();
-      t.emit({ type: "thinking", content: chunk.message.thinking });
+async function runOllama(name: string, req: ChatRequest, signal: AbortSignal, t: Tracker) {
+  const useTools = Boolean(req.tools);
+  const prepared = useTools ? noteAttachments(withSystem(req)) : inlineAttachments(withSystem(req));
+  const history = ollamaMessages(prepared);
+  const options: Record<string, unknown> = {};
+  if (req.temperature !== undefined) options.temperature = req.temperature;
+  if (req.numCtx) options.num_ctx = req.numCtx;
+  const think = thinkPayload(req.think);
+
+  let outputTokens = 0;
+  let inputTokens: number | undefined;
+  let tokensPerSecond: number | undefined;
+
+  for (let round = 0; round < 4; round++) {
+    const body: Record<string, unknown> = { model: name, messages: history, stream: true };
+    if (Object.keys(options).length) body.options = options;
+    if (think !== undefined) body.think = think;
+    if (useTools) body.tools = LAB_TOOLS;
+
+    const res = await ollamaFetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok || !res.body) throw new Error(await ollamaError(res));
+
+    let toolCalls: ToolCall[] = [];
+    for await (const line of readLines(res.body)) {
+      const chunk = JSON.parse(line) as {
+        error?: string;
+        message?: { content?: string; thinking?: string; tool_calls?: ToolCall[] };
+        done?: boolean;
+        eval_count?: number;
+        eval_duration?: number;
+        prompt_eval_count?: number;
+      };
+      if (chunk.error) throw new Error(chunk.error);
+      if (chunk.message?.thinking) {
+        t.mark();
+        t.emit({ type: "thinking", content: chunk.message.thinking });
+      }
+      if (chunk.message?.content) {
+        t.mark();
+        t.emit({ type: "delta", content: chunk.message.content });
+      }
+      if (chunk.message?.tool_calls?.length) toolCalls = chunk.message.tool_calls;
+      if (chunk.done) {
+        inputTokens = chunk.prompt_eval_count ?? inputTokens;
+        outputTokens += chunk.eval_count ?? 0;
+        if (chunk.eval_count && chunk.eval_duration) {
+          tokensPerSecond = chunk.eval_count / (chunk.eval_duration / 1e9);
+        }
+      }
     }
-    if (chunk.message?.content) {
+
+    if (!useTools || toolCalls.length === 0) break;
+    history.push({ role: "assistant", content: "", tool_calls: toolCalls });
+    for (const call of toolCalls) {
+      const result = runLabTool(call, req);
+      const trace = { name: callName(call), arguments: callArguments(call), result };
       t.mark();
-      t.emit({ type: "delta", content: chunk.message.content });
-    }
-    if (chunk.done) {
-      t.finish({
-        inputTokens: chunk.prompt_eval_count,
-        outputTokens: chunk.eval_count,
-        tokensPerSecond:
-          chunk.eval_count && chunk.eval_duration
-            ? chunk.eval_count / (chunk.eval_duration / 1e9)
-            : undefined,
-      });
+      t.emit({ type: "tool", trace });
+      history.push({ role: "tool", content: result, tool_name: trace.name });
     }
   }
+
+  t.finish({ inputTokens, outputTokens: outputTokens || undefined, tokensPerSecond });
+}
+
+function openAIMessages(messages: ChatMessage[]) {
+  return messages.map((message) => {
+    if (message.role !== "user" || !message.images?.length) {
+      return { role: message.role, content: message.content };
+    }
+    return {
+      role: "user",
+      content: [
+        ...(message.content ? [{ type: "text", text: message.content }] : []),
+        ...message.images.map((image) => ({
+          type: "image_url",
+          image_url: { url: ensureDataUrl(image) },
+        })),
+      ],
+    };
+  });
 }
 
 async function runOpenAI(provider: ProviderConfig, name: string, req: ChatRequest, signal: AbortSignal, t: Tracker) {
   const body: Record<string, unknown> = {
     model: name,
-    messages: withSystem(req),
+    messages: openAIMessages(inlineAttachments(withSystem(req))),
     stream: true,
     stream_options: { include_usage: true },
   };
   if (req.temperature !== undefined) body.temperature = req.temperature;
+  const effort = thinkPayload(req.think);
+  if (typeof effort === "string") body.reasoning_effort = effort;
+  else if (effort === true) body.reasoning_effort = "medium";
+  else if (effort === false) body.reasoning_effort = "none";
 
   const res = await fetch(`${provider.baseUrl}/chat/completions`, {
     method: "POST",
@@ -173,16 +250,38 @@ async function runOpenAI(provider: ProviderConfig, name: string, req: ChatReques
   t.finish({ inputTokens: usage?.prompt_tokens, outputTokens: usage?.completion_tokens });
 }
 
+function anthropicMessages(messages: ChatMessage[]) {
+  return messages
+    .filter((message) => message.role !== "system")
+    .map((message) => {
+      if (message.role !== "user" || !message.images?.length) {
+        return { role: message.role, content: message.content };
+      }
+      return {
+        role: "user",
+        content: [
+          ...message.images.map((image) => ({
+            type: "image",
+            source: { type: "base64", media_type: mediaTypeOf(image), data: stripDataUrl(image) },
+          })),
+          ...(message.content ? [{ type: "text", text: message.content }] : []),
+        ],
+      };
+    });
+}
+
 async function runAnthropic(provider: ProviderConfig, name: string, req: ChatRequest, signal: AbortSignal, t: Tracker) {
-  const thinking = req.think === "on";
+  const effort = thinkPayload(req.think);
+  const thinking = effort !== undefined && effort !== false;
+  const prepared = inlineAttachments(req.messages.filter((message) => message.role !== "system"));
   const body: Record<string, unknown> = {
     model: name,
     max_tokens: thinking ? 16000 : 8192,
-    messages: req.messages.filter((m) => m.role !== "system"),
+    messages: anthropicMessages(prepared),
     stream: true,
   };
   if (req.system?.trim()) body.system = req.system.trim();
-  if (thinking) body.thinking = { type: "enabled", budget_tokens: 8000 };
+  if (thinking) body.thinking = { type: "enabled", budget_tokens: effort === "high" || effort === "max" ? 12000 : 8000 };
   else if (req.temperature !== undefined) body.temperature = Math.min(req.temperature, 1);
 
   const res = await fetch(`${provider.baseUrl}/messages`, {
@@ -246,14 +345,19 @@ function sleep(ms: number, signal: AbortSignal) {
 }
 
 async function runDemo(req: ChatRequest, signal: AbortSignal, t: Tracker) {
-  const last = [...req.messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  const preview = last.length > 60 ? `${last.slice(0, 60)}…` : last;
+  const last = [...req.messages].reverse().find((m) => m.role === "user");
+  const previewSource = last?.content ?? "";
+  const preview = previewSource.length > 60 ? `${previewSource.slice(0, 60)}…` : previewSource;
+  const extras = [
+    last?.images?.length ? `还附了 ${last.images.length} 张图片。` : "",
+    last?.attachments?.length ? `还附了文件：${last.attachments.map((file) => file.name).join("、")}。` : "",
+  ].filter(Boolean);
   const text = [
-    `你刚才说的是：「${preview}」。`,
+    `你刚才说的是：「${preview}」。${extras.join("")}`,
     "",
     "这是**演示模型**的固定回复，用来在没有真实模型时体验工作台的界面。要换成真实回答，有两种方式：",
     "",
-    "1. **本地模型**：确认 Ollama 已启动，到「模型」页下载一个推荐模型，例如 `qwen3:8b`。",
+    "1. **本地模型**：确认 Ollama 已启动，到「模型」页下载一个推荐模型，例如 `gpt-oss:20b`。",
     "2. **云端模型**：在项目根目录的 `.env.local` 里填写 API Key，例如 `DEEPSEEK_API_KEY`，然后重启开发服务。",
     "",
     "准备好之后，在左上角切换模型即可。",

@@ -12,6 +12,19 @@ export function formatBytes(bytes?: number) {
   return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+export function formatContext(tokens?: number) {
+  if (!tokens) return undefined;
+  if (tokens % 1024 === 0) return `${tokens / 1024}k`;
+  return tokens.toLocaleString("zh-CN");
+}
+
+export function formatGpu(percent?: number) {
+  if (percent === undefined) return undefined;
+  if (percent >= 99) return "100% GPU";
+  if (percent <= 0) return "CPU";
+  return `${percent}% GPU`;
+}
+
 export function formatMs(ms?: number) {
   if (ms === undefined) return "—";
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;

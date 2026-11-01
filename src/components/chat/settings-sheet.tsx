@@ -22,11 +22,15 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { DEFAULT_SETTINGS, settingsStore, type ChatSettings } from "@/lib/client/chat-store";
+import { DEFAULT_SETTINGS, readSettings, settingsStore, type ChatSettings } from "@/lib/client/chat-store";
 import { useLocalStore } from "@/lib/client/local-store";
+import { useModels } from "@/lib/client/use-api";
+import { CONTEXT_OPTIONS } from "@/lib/context";
+import { formatContext } from "@/lib/format";
+import { thinkLabel } from "@/lib/think";
 import type { ThinkMode } from "@/lib/types";
 
-const THINK_OPTIONS: { value: ThinkMode; label: string }[] = [
+const BASE_THINK: { value: ThinkMode; label: string }[] = [
   { value: "default", label: "跟随模型默认" },
   { value: "on", label: "开启思考" },
   { value: "off", label: "关闭思考" },
@@ -39,8 +43,19 @@ const SYSTEM_PRESETS = [
 ];
 
 export function SettingsSheet() {
-  const settings = useLocalStore(settingsStore);
-  const update = (patch: Partial<ChatSettings>) => settingsStore.set((prev) => ({ ...prev, ...patch }));
+  const stored = useLocalStore(settingsStore);
+  const settings = { ...DEFAULT_SETTINGS, ...stored };
+  const { data } = useModels();
+  const selected = data?.models.find((model) => model.id === settings.model);
+  const levels = (selected?.thinkingValues ?? []).filter((value): value is string => typeof value === "string");
+  const thinkOptions = [
+    BASE_THINK[0],
+    ...levels
+      .filter((level) => level !== "on" && level !== "off")
+      .map((level) => ({ value: level, label: `思考档 ${thinkLabel(level)}` })),
+    ...BASE_THINK.slice(1),
+  ];
+  const update = (patch: Partial<ChatSettings>) => settingsStore.set((prev) => ({ ...readSettings(), ...prev, ...patch }));
 
   return (
     <Sheet>
@@ -112,15 +127,15 @@ export function SettingsSheet() {
           <div className="flex flex-col gap-2">
             <Label>思考模式</Label>
             <Select
-              items={THINK_OPTIONS}
+              items={thinkOptions}
               value={settings.think}
-              onValueChange={(value) => value && update({ think: value as ThinkMode })}
+              onValueChange={(value) => value && update({ think: value })}
             >
               <SelectTrigger className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent alignItemWithTrigger={false}>
-                {THINK_OPTIONS.map((option) => (
+                {thinkOptions.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
@@ -128,8 +143,42 @@ export function SettingsSheet() {
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              适用于 Qwen3、DeepSeek R1、gpt-oss 等推理模型。不支持思考的模型请保持默认。
+              {selected?.thinkingValues?.length
+                ? `这个模型声明的档位：${selected.thinkingValues.map(thinkLabel).join(" / ")}，默认 ${thinkLabel(selected.thinkingDefault ?? "default")}。`
+                : "档位来自 Ollama 的 /api/show。云端模型会把 low / medium / high 转成 reasoning_effort；不支持的模型请保持默认。"}
+              {selected?.contextLength ? ` 模型窗口 ${formatContext(selected.contextLength)}。` : ""}
             </p>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <Label>上下文长度</Label>
+            <Select
+              items={CONTEXT_OPTIONS.map((option) => ({ value: String(option.value), label: option.label }))}
+              value={String(settings.numCtx)}
+              onValueChange={(value) => value && update({ numCtx: Number(value) })}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false}>
+                {CONTEXT_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={String(option.value)}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              只对本地 Ollama 生效。36 GB 机器的默认档是 32k，开到 64k 会多占内存。模型主页上的 256k 不会自动生效。
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="tools-switch">本地工具</Label>
+              <p className="text-xs text-muted-foreground">当前时间，以及读取这次附上的文本。只对 Ollama 生效。</p>
+            </div>
+            <Switch id="tools-switch" checked={settings.tools} onCheckedChange={(checked) => update({ tools: checked })} />
           </div>
 
           <Button variant="ghost" size="sm" className="self-start" onClick={() => settingsStore.set({ ...DEFAULT_SETTINGS, model: settings.model })}>

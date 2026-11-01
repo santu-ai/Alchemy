@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AssistantContent } from "@/components/assistant-content";
-import { Composer } from "@/components/chat/composer";
+import { Composer, type ComposerPayload } from "@/components/chat/composer";
 import { SessionList } from "@/components/chat/session-list";
 import { SettingsSheet } from "@/components/chat/settings-sheet";
 import { ModelSelect, pickDefaultModel } from "@/components/model-select";
@@ -16,6 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   newMessage,
   newSession,
+  readSettings,
   sessionsStore,
   settingsStore,
   touchSession,
@@ -25,10 +26,11 @@ import {
   type UiMessage,
 } from "@/lib/client/chat-store";
 import { useHydrated, useLocalStore } from "@/lib/client/local-store";
+import { createFrameBatcher } from "@/lib/client/frame";
 import { streamChat } from "@/lib/client/stream";
 import { useModels } from "@/lib/client/use-api";
 import { splitThinking } from "@/lib/format";
-import type { ChatMessage } from "@/lib/types";
+import type { ChatMessage, GenerationStats, ToolTrace } from "@/lib/types";
 
 const STARTERS = [
   "用三句话解释什么是 RAG，以及它适合解决什么问题",
@@ -43,8 +45,10 @@ function toHistory(messages: UiMessage[]): ChatMessage[] {
     .map((m) => ({
       role: m.role,
       content: m.role === "assistant" ? splitThinking(m.content).answer : m.content,
+      images: m.images,
+      attachments: m.attachments,
     }))
-    .filter((m) => m.content.trim());
+    .filter((m) => m.content.trim() || m.images?.length || m.attachments?.length);
 }
 
 export function ChatView() {
@@ -84,7 +88,30 @@ export function ChatView() {
     abortRef.current = controller;
     setStreamingId(assistant.id);
     stickToBottom.current = true;
-    const current = settingsStore.get();
+    const current = readSettings();
+    const draft = {
+      content: "",
+      thinking: "",
+      tools: [] as ToolTrace[],
+      stats: undefined as GenerationStats | undefined,
+      error: undefined as string | undefined,
+    };
+    const write = (persist: boolean) => {
+      updateMessage(
+        session.id,
+        assistant.id,
+        (message) => ({
+          ...message,
+          content: draft.content,
+          thinking: draft.thinking || undefined,
+          tools: draft.tools.length ? [...draft.tools] : undefined,
+          stats: draft.stats,
+          error: draft.error,
+        }),
+        { persist },
+      );
+    };
+    const batch = createFrameBatcher(() => write(false));
 
     try {
       await streamChat(
@@ -94,40 +121,53 @@ export function ChatView() {
           system: current.system,
           temperature: current.temperatureEnabled ? current.temperature : undefined,
           think: current.think,
+          numCtx: current.numCtx,
+          tools: current.tools,
         },
         (event) => {
-          updateMessage(session.id, assistant.id, (m) => {
-            switch (event.type) {
-              case "delta":
-                return { ...m, content: m.content + event.content };
-              case "thinking":
-                return { ...m, thinking: (m.thinking ?? "") + event.content };
-              case "done":
-                return { ...m, stats: event.stats };
-              case "error":
-                return { ...m, error: event.message };
-            }
-          });
+          switch (event.type) {
+            case "delta":
+              draft.content += event.content;
+              break;
+            case "thinking":
+              draft.thinking += event.content;
+              break;
+            case "tool":
+              draft.tools.push(event.trace);
+              break;
+            case "done":
+              draft.stats = event.stats;
+              break;
+            case "error":
+              draft.error = event.message;
+              break;
+          }
+          batch.push();
         },
         controller.signal,
       );
     } catch (error) {
       if (!controller.signal.aborted) {
-        const message = error instanceof Error ? error.message : String(error);
-        updateMessage(session.id, assistant.id, (m) => ({ ...m, error: `连接中断：${message}` }));
+        draft.error = `连接中断：${error instanceof Error ? error.message : String(error)}`;
       }
     } finally {
+      batch.flush();
+      if (!sessionsStore.flush()) {
+        toast.error("浏览器存储空间不够，这次对话没有完整保存。可以删掉旧对话或图片后再试。");
+      }
       abortRef.current = null;
       setStreamingId(null);
     }
   };
 
-  const send = (text: string) => {
+  const send = (text: string, extras?: ComposerPayload) => {
     if (!model) {
       toast.error("请先选择一个模型");
       return;
     }
     const userMessage = newMessage("user", text);
+    if (extras?.images.length) userMessage.images = extras.images;
+    if (extras?.attachments.length) userMessage.attachments = extras.attachments;
     let session = active;
     if (!session) {
       const created = newSession(text, model);
@@ -249,8 +289,19 @@ export function ChatView() {
               messages.map((message) =>
                 message.role === "user" ? (
                   <div key={message.id} className="flex justify-end">
-                    <div className="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm whitespace-pre-wrap text-primary-foreground">
-                      {message.content}
+                    <div className="flex max-w-[85%] flex-col items-end gap-2">
+                      {message.images?.map((src, index) => (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img key={index} src={src} alt="" className="max-h-48 rounded-xl" />
+                      ))}
+                      {message.attachments?.map((file) => (
+                        <span key={file.name} className="rounded-lg bg-muted px-2 py-1 text-xs text-muted-foreground">
+                          {file.name}
+                        </span>
+                      ))}
+                      <div className="rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm whitespace-pre-wrap text-primary-foreground">
+                        {message.content}
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -259,6 +310,7 @@ export function ChatView() {
                     <AssistantContent
                       content={message.content}
                       thinking={message.thinking}
+                      tools={message.tools}
                       error={message.error}
                       stats={message.stats}
                       streaming={message.id === streamingId}

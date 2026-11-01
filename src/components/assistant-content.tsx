@@ -5,17 +5,19 @@ import { BrainIcon, ChevronRightIcon } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { splitThinking, statsSummary } from "@/lib/format";
-import type { GenerationStats } from "@/lib/types";
+import type { GenerationStats, ToolTrace } from "@/lib/types";
 
 export function AssistantContent({
   content,
   thinking,
+  tools,
   streaming,
   error,
   stats,
 }: {
   content: string;
   thinking?: string;
+  tools?: ToolTrace[];
   streaming?: boolean;
   error?: string;
   stats?: GenerationStats;
@@ -49,7 +51,32 @@ export function AssistantContent({
         </div>
       ) : null}
 
-      {parts.answer ? <Markdown>{parts.answer}</Markdown> : null}
+      {tools?.length ? (
+        <Collapsible defaultOpen={false}>
+          <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+            工具 · {tools.length}
+            <ChevronRightIcon className="size-3.5 transition-transform group-data-[panel-open]:rotate-90" />
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="mt-2 flex flex-col gap-2">
+              {tools.map((tool, index) => (
+                <div key={`${tool.name}-${index}`} className="border-l-2 pl-3 text-xs text-muted-foreground">
+                  <div className="font-medium text-foreground">{tool.name}</div>
+                  <div className="mt-1 whitespace-pre-wrap">{tool.result}</div>
+                </div>
+              ))}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      ) : null}
+
+      {parts.answer ? (
+        streaming ? (
+          <div className="text-sm whitespace-pre-wrap">{parts.answer}</div>
+        ) : (
+          <Markdown>{parts.answer}</Markdown>
+        )
+      ) : null}
 
       {error ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">

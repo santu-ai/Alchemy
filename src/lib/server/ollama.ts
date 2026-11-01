@@ -59,14 +59,94 @@ export async function listRunningModels(): Promise<RunningModel[]> {
   const res = await ollamaFetch("/api/ps", { timeoutMs: 4000 });
   if (!res.ok) return [];
   const data = (await res.json()) as {
-    models?: { name: string; size?: number; size_vram?: number; expires_at?: string }[];
+    models?: {
+      name: string;
+      size?: number;
+      size_vram?: number;
+      expires_at?: string;
+      context_length?: number;
+    }[];
   };
-  return (data.models ?? []).map((m) => ({
-    name: m.name,
-    sizeBytes: m.size ?? 0,
-    vramBytes: m.size_vram ?? 0,
-    expiresAt: m.expires_at,
-  }));
+  return (data.models ?? []).map((m) => {
+    const size = m.size ?? 0;
+    const vram = m.size_vram ?? 0;
+    return {
+      name: m.name,
+      sizeBytes: size,
+      vramBytes: vram,
+      expiresAt: m.expires_at,
+      contextLength: m.context_length,
+      gpuPercent: size > 0 ? Math.round((vram / size) * 100) : undefined,
+    };
+  });
+}
+
+export interface OllamaModelFacts {
+  contextLength?: number;
+  capabilities: string[];
+  thinkingValues: Array<string | boolean>;
+  thinkingDefault?: string | boolean;
+}
+
+const showCache = new Map<string, { at: number; facts: OllamaModelFacts }>();
+const SHOW_TTL_MS = 5 * 60 * 1000;
+
+function contextFromInfo(info?: Record<string, unknown>) {
+  if (!info) return undefined;
+  for (const [key, value] of Object.entries(info)) {
+    if (key.endsWith(".context_length") && typeof value === "number") return value;
+  }
+  return undefined;
+}
+
+export async function showOllamaModel(name: string): Promise<OllamaModelFacts> {
+  const hit = showCache.get(name);
+  if (hit && Date.now() - hit.at < SHOW_TTL_MS) return hit.facts;
+
+  const res = await ollamaFetch("/api/show", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: name }),
+    timeoutMs: 8000,
+  });
+  if (!res.ok) throw new Error(await ollamaError(res));
+  const data = (await res.json()) as {
+    capabilities?: string[];
+    model_info?: Record<string, unknown>;
+    thinking?: { values?: Array<string | boolean>; default?: string | boolean };
+  };
+  const facts: OllamaModelFacts = {
+    contextLength: contextFromInfo(data.model_info),
+    capabilities: data.capabilities ?? [],
+    thinkingValues: data.thinking?.values ?? [],
+    thinkingDefault: data.thinking?.default,
+  };
+  showCache.set(name, { at: Date.now(), facts });
+  return facts;
+}
+
+async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+export async function enrichOllamaModels(models: ModelInfo[]): Promise<ModelInfo[]> {
+  return mapPool(models, 4, async (model) => {
+    try {
+      const facts = await showOllamaModel(model.name);
+      return { ...model, ...facts };
+    } catch {
+      return model;
+    }
+  });
 }
 
 export async function ollamaVersion() {

@@ -2,9 +2,15 @@
 
 import { useSyncExternalStore } from "react";
 
+export interface StoreWriteOptions {
+  /** 流式生成时先跳过落盘，结束时再 flush。 */
+  persist?: boolean;
+}
+
 export interface LocalStore<T> {
   get: () => T;
-  set: (next: T | ((prev: T) => T)) => void;
+  set: (next: T | ((prev: T) => T), options?: StoreWriteOptions) => void;
+  flush: () => boolean;
   subscribe: (listener: () => void) => () => void;
   serverSnapshot: () => T;
 }
@@ -18,7 +24,10 @@ export function createLocalStore<T>(key: string, initial: T): LocalStore<T> {
     persistTimer = undefined;
     try {
       window.localStorage.setItem(key, JSON.stringify(cached));
-    } catch {}
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   const read = (): T => {
@@ -37,11 +46,18 @@ export function createLocalStore<T>(key: string, initial: T): LocalStore<T> {
 
   return {
     get: read,
-    set(next) {
+    set(next, options) {
       const value = typeof next === "function" ? (next as (prev: T) => T)(read()) : next;
       cached = value;
-      persistTimer ??= setTimeout(persist, 300);
+      if (options?.persist !== false) persistTimer ??= setTimeout(persist, 300);
       emit();
+    },
+    flush() {
+      if (persistTimer) {
+        clearTimeout(persistTimer);
+        persistTimer = undefined;
+      }
+      return persist();
     },
     subscribe(listener) {
       listeners.add(listener);

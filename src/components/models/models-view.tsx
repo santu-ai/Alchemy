@@ -37,7 +37,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { settingsStore } from "@/lib/client/chat-store";
 import { ollamaModelAction, pullModel, type PullProgress } from "@/lib/client/stream";
 import { useModels, useStatus } from "@/lib/client/use-api";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatContext, formatGpu } from "@/lib/format";
+import { thinkLabel } from "@/lib/think";
 import { RECOMMENDED_MODELS } from "@/lib/recommended";
 
 interface PullState {
@@ -87,7 +88,7 @@ export function ModelsView() {
   const reachable = status.data?.ollama.reachable;
   const installed = (models.data?.models ?? []).filter((m) => m.provider === "ollama");
   const findInstalled = (name: string) => installed.find((m) => m.name === name || m.name === `${name}:latest`);
-  const running = new Set(status.data?.ollama.running.map((m) => m.name) ?? []);
+  const running = new Map(status.data?.ollama.running.map((model) => [model.name, model]) ?? []);
   const cloud = (models.data?.providers ?? status.data?.providers ?? []).filter((p) => !p.local);
   const cloudCounts = new Map<string, number>();
   for (const m of models.data?.models ?? []) if (!m.local) cloudCounts.set(m.provider, (cloudCounts.get(m.provider) ?? 0) + 1);
@@ -163,7 +164,7 @@ export function ModelsView() {
           </Alert>
         ) : null}
 
-        <Section title="下载本地模型" description="模型名称可在 ollama.com/library 查到，例如 qwen3:8b。">
+        <Section title="下载本地模型" description="按这台 36 GB 的 Mac 排过。名称可在 ollama.com/library 查到，例如 gpt-oss:20b。">
           <form
             className="flex flex-col gap-2 sm:flex-row"
             onSubmit={(event) => {
@@ -174,7 +175,7 @@ export function ModelsView() {
             <Input
               value={custom}
               onChange={(event) => setCustom(event.target.value)}
-              placeholder="输入模型名称，例如 llama3.2:3b"
+              placeholder="输入模型名称，例如 gemma4:12b"
               aria-label="模型名称"
               disabled={!reachable || pull !== null}
               className="sm:max-w-sm"
@@ -244,12 +245,12 @@ export function ModelsView() {
             </div>
           ) : installed.length === 0 ? (
             <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-              {reachable ? "还没有本地模型。从上面的推荐里挑一个下载吧，新手建议先下 qwen3:8b。" : "Ollama 连接后，这里会列出已下载的模型。"}
+              {reachable ? "还没有本地模型。从上面的推荐里挑一个下载吧，这台机器建议先下 gpt-oss:20b。" : "Ollama 连接后，这里会列出已下载的模型。"}
             </div>
           ) : (
             <ul className="divide-y rounded-xl border bg-card">
               {installed.map((model) => {
-                const loaded = running.has(model.name);
+                const loaded = running.get(model.name);
                 return (
                   <li key={model.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
                     <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -265,10 +266,23 @@ export function ModelsView() {
                           {model.parameterSize ? <span>{model.parameterSize} 参数</span> : null}
                           {model.quantization ? <span>{model.quantization}</span> : null}
                           {model.family ? <span>{model.family}</span> : null}
+                          {model.contextLength ? <span>窗口 {formatContext(model.contextLength)}</span> : null}
+                          {model.capabilities?.includes("vision") ? <span>可看图</span> : null}
+                          {model.capabilities?.includes("tools") ? <span>可调用工具</span> : null}
+                          {model.thinkingValues?.length ? (
+                            <span>思考 {model.thinkingValues.map((value) => thinkLabel(value)).join(" / ")}</span>
+                          ) : null}
                           <span className="inline-flex items-center gap-1">
                             <HardDriveIcon className="size-3" />
                             {formatBytes(model.sizeBytes)}
                           </span>
+                          {loaded ? (
+                            <span>
+                              本次 {formatContext(loaded.contextLength) ?? "上下文未知"}
+                              {formatGpu(loaded.gpuPercent) ? ` · ${formatGpu(loaded.gpuPercent)}` : ""}
+                              {loaded.sizeBytes ? ` · ${formatBytes(loaded.sizeBytes)}` : ""}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     </div>
