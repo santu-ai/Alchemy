@@ -150,6 +150,16 @@ export async function listRuns() {
     .map(publicRun);
 }
 
+export async function runsSummary() {
+  const metas = await listMetas();
+  const waiting = metas.filter((meta) => isFinishedMeta(meta) && meta.worktree && existsSync(meta.worktree));
+  return {
+    running: metas.filter((meta) => meta.status === "running").length,
+    waiting: waiting.length,
+    checksFailed: waiting.filter((meta) => meta.checks?.round === meta.round && meta.checks.status === "failed").length,
+  };
+}
+
 export interface CreateRunInput {
   agents: AgentKind[];
   mode: RunMode;

@@ -2,7 +2,8 @@ import "server-only";
 
 import { ensureDataUrl, mediaTypeOf, stripDataUrl } from "@/lib/images";
 import { thinkPayload } from "@/lib/think";
-import type { ChatMessage, ChatRequest, GenerationStats, StreamEvent } from "@/lib/types";
+import type { ChatMessage, ChatRequest, GenerationStats, InferencePurpose, StreamEvent } from "@/lib/types";
+import { acquireLease } from "./inference";
 import { ollamaError, ollamaFetch } from "./ollama";
 import { getProvider, splitModelId, type ProviderConfig } from "./providers";
 import { callArguments, callName, LAB_TOOLS, runLabTool, type ToolCall } from "./tools";
@@ -373,7 +374,11 @@ async function runDemo(req: ChatRequest, signal: AbortSignal, t: Tracker) {
   t.finish({ outputTokens: tokens.length });
 }
 
-export function chatStream(req: ChatRequest, requestSignal: AbortSignal) {
+export function chatStream(
+  req: ChatRequest,
+  requestSignal: AbortSignal,
+  usage: { purpose: InferencePurpose; label?: string } = { purpose: req.purpose ?? "chat" },
+) {
   const encoder = new TextEncoder();
   const local = new AbortController();
   const signal = AbortSignal.any([requestSignal, local.signal]);
@@ -386,13 +391,17 @@ export function chatStream(req: ChatRequest, requestSignal: AbortSignal) {
         } catch {}
       };
       const tracker = createTracker(send);
+      let release: (() => void) | undefined;
       try {
         const parsed = splitModelId(req.model);
         const provider = parsed && getProvider(parsed.provider);
         if (!parsed || !provider) throw new Error(`未知模型：${req.model}`);
         if (!provider.configured) throw new Error(`${provider.label} 未配置，请在 .env.local 设置 ${provider.envHint}`);
 
-        if (provider.kind === "ollama") await runOllama(parsed.name, req, signal, tracker);
+        if (provider.kind === "ollama") {
+          release = acquireLease(parsed.name, usage.purpose, usage.label);
+          await runOllama(parsed.name, req, signal, tracker);
+        }
         else if (provider.kind === "openai") await runOpenAI(provider, parsed.name, req, signal, tracker);
         else if (provider.kind === "anthropic") await runAnthropic(provider, parsed.name, req, signal, tracker);
         else await runDemo(req, signal, tracker);
@@ -403,6 +412,7 @@ export function chatStream(req: ChatRequest, requestSignal: AbortSignal) {
           send({ type: "error", message: error instanceof Error ? error.message : String(error) });
         }
       } finally {
+        release?.();
         try {
           controller.close();
         } catch {}

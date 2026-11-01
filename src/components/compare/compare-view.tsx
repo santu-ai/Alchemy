@@ -188,6 +188,7 @@ export function CompareView() {
           think,
           numCtx,
           tools,
+          purpose: "compare",
         },
         (event) => {
           const draft = drafts.current.get(lane.key);

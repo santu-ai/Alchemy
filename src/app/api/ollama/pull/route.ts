@@ -1,3 +1,4 @@
+import { acquireLease } from "@/lib/server/inference";
 import { ollamaError, ollamaFetch } from "@/lib/server/ollama";
 
 export async function POST(request: Request) {
@@ -15,7 +16,10 @@ export async function POST(request: Request) {
     if (!res.ok || !res.body) {
       return Response.json({ error: await ollamaError(res) }, { status: res.status || 502 });
     }
-    return new Response(res.body, {
+    const release = acquireLease(name, "pull");
+    request.signal.addEventListener("abort", release, { once: true });
+    const body = res.body.pipeThrough(new TransformStream({ flush: release }));
+    return new Response(body, {
       headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store" },
     });
   } catch (error) {

@@ -25,6 +25,7 @@ import { useHydrated, useLocalStore } from "@/lib/client/local-store";
 import { useModels, useStatus } from "@/lib/client/use-api";
 import { formatBytes, formatContext, formatGpu } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { NodesPanel } from "./nodes-panel";
 
 const ACTIONS = [
   { href: "/chat", title: "开始对话", text: "和本地或云端模型聊天，支持思考过程与 Markdown。", icon: MessageSquareIcon },
@@ -194,6 +195,8 @@ export function OverviewView() {
             hint={cloudConfigured.length ? cloudConfigured.map((p) => p.label).join("、") : "可选，在 .env.local 配置"}
           />
         </div>
+
+        {status.data && <NodesPanel status={status.data} />}
 
         <div className="grid gap-6 lg:grid-cols-[1.2fr_1fr]">
           <section className="flex flex-col gap-3">

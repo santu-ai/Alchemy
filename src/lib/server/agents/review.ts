@@ -89,6 +89,7 @@ export async function reviewStream(id: string, model: string, signal: AbortSigna
   return chatStream(
     { model, system: SYSTEM, messages: [{ role: "user", content: prompt.content }], numCtx: prompt.numCtx },
     signal,
+    { purpose: "review", label: meta.rounds[0]?.message.split("\n")[0].slice(0, 40) },
   ).pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {

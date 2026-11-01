@@ -9,7 +9,11 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "setup": "bash scripts/setup-mac.sh",
-    "doctor": "bash scripts/doctor.sh"
+    "doctor": "bash scripts/doctor.sh",
+    "service:install": "bash scripts/service.sh install",
+    "service:uninstall": "bash scripts/service.sh uninstall",
+    "service:restart": "bash scripts/service.sh restart",
+    "service:status": "bash scripts/service.sh status"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",

@@ -98,6 +98,37 @@ export async function loggedIn(kind: AgentKind, bin: string) {
   return value;
 }
 
+const refreshing = new Set<string>();
+
+/** 只读缓存，过期就在后台刷新，不让高频的 status 请求等子进程。 */
+function peek<T>(cache: Map<string, { value?: T; at: number }>, key: string, ttlMs: number, refresh: () => Promise<unknown>) {
+  const cached = cache.get(key);
+  if ((!cached || Date.now() - cached.at >= ttlMs) && !refreshing.has(key)) {
+    refreshing.add(key);
+    void refresh().finally(() => refreshing.delete(key));
+  }
+  return cached?.value;
+}
+
+function peekLogin(kind: AgentKind, bin: string) {
+  if (kind === "cursor" && process.env.CURSOR_API_KEY) return true;
+  if (kind === "junie") return process.env.JUNIE_API_KEY ? true : undefined;
+  return peek(loginCache, bin, 5 * 60_000, () => loggedIn(kind, bin));
+}
+
+export function peekAgents() {
+  return (["cursor", "junie"] as AgentKind[]).map((kind) => {
+    const bin = agentBin(kind);
+    return {
+      kind,
+      label: AGENT_LABELS[kind],
+      available: Boolean(bin),
+      version: bin ? peek(versionCache, bin, 10 * 60_000, () => versionOf(bin)) : undefined,
+      loggedIn: bin ? peekLogin(kind, bin) : undefined,
+    };
+  });
+}
+
 function loginHint(kind: AgentKind, bin: string | undefined) {
   if (kind === "junie") return "在终端运行一次 junie 完成登录，或者在 .env.local 里设置 JUNIE_API_KEY";
   const command = !bin || onPath("cursor-agent") ? "cursor-agent" : `"${bin}"`;

@@ -35,7 +35,8 @@ export async function POST(request: Request) {
     if (problem) return invalid(problem);
   }
 
-  return new Response(chatStream(body, request.signal), {
+  const purpose = body.purpose === "compare" ? "compare" : "chat";
+  return new Response(chatStream(body, request.signal, { purpose }), {
     headers: {
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Cache-Control": "no-store",

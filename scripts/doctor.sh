@@ -63,6 +63,36 @@ else
   note "Ollama 已安装但未运行，运行：open -a Ollama"
 fi
 
+section "Agent 与 IDE"
+cursor_bin="${CURSOR_AGENT_BIN:-$(command -v cursor-agent 2>/dev/null || true)}"
+cursor_fallback="$HOME/Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker/agent-cli/.local/bin/cursor-agent"
+[[ -z "$cursor_bin" && -x "$cursor_fallback" ]] && cursor_bin="$cursor_fallback"
+if [[ -z "$cursor_bin" ]]; then
+  note "没有 cursor-agent（可选），安装：curl https://cursor.com/install -fsS | bash"
+elif "$cursor_bin" status 2>&1 | grep -qi "not logged in"; then
+  note "Cursor CLI 未登录，运行：cursor-agent login"
+else
+  pass "Cursor CLI  $("$cursor_bin" --version 2>/dev/null | tail -n 1)"
+fi
+junie_bin="${JUNIE_BIN:-$(command -v junie 2>/dev/null || true)}"
+[[ -z "$junie_bin" && -x "$HOME/.local/bin/junie" ]] && junie_bin="$HOME/.local/bin/junie"
+if [[ -n "$junie_bin" ]]; then
+  pass "Junie CLI  $("$junie_bin" --version 2>/dev/null | tail -n 1 | sed -E 's/^Junie version:[[:space:]]*//')"
+else
+  note "没有 junie（可选），见 https://junie.jetbrains.com"
+fi
+ides=()
+for ide in webstorm idea pycharm; do
+  if [[ -x "$HOME/Library/Application Support/JetBrains/Toolbox/scripts/$ide" ]] || command -v "$ide" >/dev/null 2>&1; then ides+=("$ide"); fi
+done
+if (( ${#ides[@]} > 0 )); then pass "JetBrains IDE：${ides[*]}"; else note "没找到 JetBrains IDE 启动脚本（Toolbox → 设置 → 生成 Shell 脚本）"; fi
+plist="$HOME/Library/LaunchAgents/com.alchemy.server.plist"
+if [[ -f "$plist" ]]; then
+  if launchctl print "gui/$(id -u)/com.alchemy.server" >/dev/null 2>&1; then pass "炼丹炉常驻服务已加载"; else note "常驻服务已安装但没在运行，运行：pnpm service:install"; fi
+else
+  note "炼丹炉没有常驻，关掉终端后 Agent 的检查和通知会停。需要时运行：pnpm service:install"
+fi
+
 section "炼丹炉项目"
 if [[ -d node_modules ]]; then pass "依赖已安装"; else fail "依赖未安装，运行：pnpm install"; fi
 if [[ -f .env.local ]]; then

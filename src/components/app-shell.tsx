@@ -80,19 +80,35 @@ function OllamaIndicator() {
   const { data, loading } = useStatus(15000);
   const reachable = data?.ollama.reachable;
   const label = !data && loading ? "检查中…" : reachable ? `Ollama ${data?.ollama.version}` : "Ollama 未连接";
+  const runs = data?.nodes.runs;
+  const agentLabel = runs && [runs.running && `${runs.running} 个在跑`, runs.waiting && `${runs.waiting} 个待合并`].filter(Boolean).join(" · ");
+  const warnings = data?.warnings ?? [];
   return (
-    <Link
-      href="/models"
-      className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-muted-foreground hover:bg-sidebar-accent/60"
-    >
-      <span
-        className={cn(
-          "size-2 rounded-full",
-          !data ? "bg-muted-foreground/40" : reachable ? "bg-success" : "bg-destructive",
-        )}
-      />
-      <span className="truncate">{label}</span>
-    </Link>
+    <div className="flex flex-col">
+      <Link
+        href="/"
+        title={warnings.join("\n") || undefined}
+        className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-muted-foreground hover:bg-sidebar-accent/60"
+      >
+        <span
+          className={cn(
+            "size-2 rounded-full",
+            !data ? "bg-muted-foreground/40" : !reachable ? "bg-destructive" : warnings.length ? "bg-warning" : "bg-success",
+          )}
+        />
+        <span className="truncate">{label}</span>
+        {warnings.length > 0 && <span className="ml-auto shrink-0 text-warning">{warnings.length} 条提醒</span>}
+      </Link>
+      {agentLabel && (
+        <Link
+          href="/agents"
+          className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-sidebar-accent/60"
+        >
+          <span className={cn("size-2 rounded-full", runs.running ? "animate-pulse bg-brand" : "bg-muted-foreground/60")} />
+          <span className="truncate">Agent：{agentLabel}</span>
+        </Link>
+      )}
+    </div>
   );
 }
 

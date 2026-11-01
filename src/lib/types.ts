@@ -49,6 +49,44 @@ export interface ChatAttachment {
   content: string;
 }
 
+export type InferencePurpose = "chat" | "compare" | "review" | "pull";
+
+export const PURPOSE_LABELS: Record<InferencePurpose, string> = {
+  chat: "对话",
+  compare: "模型对比",
+  review: "Agent 审查",
+  pull: "下载",
+};
+
+/** 炼丹炉自己发起、还没结束的本机 Ollama 请求。 */
+export interface InferenceLease {
+  id: string;
+  model: string;
+  purpose: InferencePurpose;
+  label?: string;
+  startedAt: number;
+}
+
+export interface NodeSummary {
+  agents: Array<{ kind: string; label: string; available: boolean; version?: string; loggedIn?: boolean }>;
+  /** 只列装了的。 */
+  ides: Array<{ id: string; label: string }>;
+  runs: {
+    running: number;
+    /** 跑完了、工作树还在，等你合并或丢弃。 */
+    waiting: number;
+    checksFailed: number;
+  };
+  home: { path: string; bytes?: number };
+  service: {
+    pid: number;
+    startedAt: number;
+    /** 由 launchd 托管，开机自启、崩溃自动拉起。 */
+    managed: boolean;
+    production: boolean;
+  };
+}
+
 export interface StatusResponse {
   ollama: {
     host: string;
@@ -58,6 +96,12 @@ export interface StatusResponse {
     running: RunningModel[];
   };
   providers: ProviderInfo[];
+  nodes: NodeSummary;
+  inference: InferenceLease[];
+  /** 需要你留意的资源情况，只提示不拦截。 */
+  warnings: string[];
+  /** 服务端生成这份状态的时间，页面上的「已运行多久」以它为准。 */
+  checkedAt: number;
 }
 
 export interface ChatMessage {
@@ -81,6 +125,8 @@ export interface ChatRequest {
   numCtx?: number;
   /** 只对 Ollama 生效，启用本机的时间和附件工具。 */
   tools?: boolean;
+  /** 只用来在概览里标出是谁在占用本机模型。 */
+  purpose?: "chat" | "compare";
 }
 
 export interface ToolTrace {
