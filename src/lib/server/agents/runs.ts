@@ -1,9 +1,9 @@
 import "server-only";
 
 import { spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, readdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -16,73 +16,46 @@ import {
   type RunDetail,
   type RunMode,
 } from "@/lib/agents/types";
-import { AGENT_MODES, ALCHEMY_HOME, agentBin, agentEnv, loggedIn } from "./env";
+import { checkOutputs, stopChecks } from "./checks";
+import { AGENT_MODES, agentBin, agentEnv, loggedIn } from "./env";
 import { diffChanges, findRepo, git } from "./git";
+import { readReview } from "./review";
+import {
+  alive,
+  PENDING_TTL_MS,
+  publicRun,
+  readMeta,
+  RunError,
+  runDir,
+  runFile,
+  RUNS_DIR,
+  sameToken,
+  TREES_DIR,
+  updateMeta,
+  writeMeta,
+  type RunMeta,
+} from "./store";
 
-interface RunMeta extends AgentRun {
-  nonce?: string;
-  pid?: number;
-  cancelRequested?: boolean;
-  mergeNonce?: string;
-  mergeNonceAt?: number;
-}
+export { RunError } from "./store";
 
-const RUNS_DIR = path.join(ALCHEMY_HOME, "runs");
-const TREES_DIR = path.join(ALCHEMY_HOME, "worktrees");
 const MAX_RUNNING = 3;
-const PENDING_TTL_MS = 10 * 60_000;
 const LOG_CHUNK = 256 * 1024;
 const TASK_PLACEHOLDER = "<任务>";
+const FINISHED = new Set(["done", "failed", "cancelled", "lost"]);
 
-export class RunError extends Error {
-  constructor(
-    message: string,
-    readonly status = 400,
-  ) {
-    super(message);
-  }
-}
+const isFinishedMeta = (meta: RunMeta) => FINISHED.has(meta.status);
 
-const runDir = (id: string) => path.join(RUNS_DIR, id);
-const runFile = (id: string, name: string) => path.join(runDir(id), name);
-
-function assertId(id: string) {
-  if (!/^[a-z0-9]{6,12}-[a-f0-9]{6}$/.test(id)) throw new RunError("任务编号不对", 404);
-}
-
-function publicRun(meta: RunMeta): AgentRun {
-  const run: AgentRun & Partial<RunMeta> = { ...meta };
-  delete run.nonce;
-  delete run.pid;
-  delete run.cancelRequested;
-  delete run.mergeNonce;
-  delete run.mergeNonceAt;
-  return run as AgentRun;
-}
-
-async function readMeta(id: string): Promise<RunMeta> {
-  assertId(id);
+async function findSessionId(id: string) {
+  const file = runFile(id, "out.log");
+  if (!existsSync(file)) return undefined;
+  const handle = await open(file, "r");
   try {
-    return JSON.parse(await readFile(runFile(id, "meta.json"), "utf8")) as RunMeta;
-  } catch {
-    throw new RunError("找不到这个任务", 404);
-  }
-}
-
-async function writeMeta(meta: RunMeta) {
-  const target = runFile(meta.id, "meta.json");
-  const temp = `${target}.${process.pid}.tmp`;
-  await writeFile(temp, JSON.stringify(meta, null, 2));
-  await rename(temp, target);
-}
-
-function alive(pid: number | undefined) {
-  if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    const buffer = Buffer.alloc(64 * 1024);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const head = buffer.subarray(0, bytesRead).toString("utf8");
+    return /"session_?[iI]d"\s*:\s*"([^"]+)"/.exec(head)?.[1];
+  } finally {
+    await handle.close();
   }
 }
 
@@ -101,22 +74,54 @@ async function refresh(meta: RunMeta) {
   } else {
     return meta;
   }
+  const round = meta.rounds.at(-1);
+  if (round) {
+    round.endedAt = meta.endedAt;
+    round.exitCode = meta.exitCode;
+  }
+  meta.sessionId ??= await findSessionId(meta.id);
   await writeMeta(meta);
   return meta;
 }
 
-function agentArgs(kind: AgentKind, mode: RunMode, task: string, worktree: string) {
+function agentArgs(kind: AgentKind, mode: RunMode, task: string, worktree: string, sessionId?: string) {
   if (kind === "cursor") {
     const args = ["-p", "--output-format", "stream-json", "--trust", "--sandbox", "enabled"];
     if (mode === "plan") args.push("--mode", "plan");
+    if (sessionId) args.push("--resume", sessionId);
     return [...args, "--workspace", worktree, task];
   }
   const args = ["-p", worktree, "--output-format", "json-stream", "--skip-update-check"];
   if (mode === "review") return ["--review", ...args];
-  return ["--task", task, "--max-steps", "60", ...args];
+  const follow = sessionId ? ["--session-id", sessionId] : [];
+  return [...follow, "--task", task, "--max-steps", "60", ...args];
 }
 
-async function listMetas() {
+/** 在工作树里起一轮 Agent，脱离 Next 进程，日志追加到同一个文件。 */
+async function spawnRound(meta: RunMeta, args: string[]) {
+  const bin = agentBin(meta.agent);
+  if (!bin) throw new Error("没有找到这个 Agent 的命令行");
+  await rm(runFile(meta.id, "exit_code"), { force: true });
+  const out = await open(runFile(meta.id, "out.log"), "a");
+  const err = await open(runFile(meta.id, "err.log"), "a");
+  const script = 'cd "$1" || exit 97; shift; "$@" </dev/null; echo $? > "$ALCHEMY_EXIT_FILE"';
+  const child = spawn("/bin/sh", ["-c", script, "alchemy-run", meta.worktree!, bin, ...args], {
+    detached: true,
+    stdio: ["ignore", out.fd, err.fd],
+    env: agentEnv({ ALCHEMY_EXIT_FILE: runFile(meta.id, "exit_code"), NO_COLOR: "1" }),
+  });
+  child.unref();
+  await Promise.all([out.close(), err.close()]);
+  if (!child.pid) throw new Error("进程没有启动");
+  meta.pid = child.pid;
+  meta.status = "running";
+  meta.cancelRequested = undefined;
+  meta.endedAt = undefined;
+  meta.exitCode = undefined;
+  meta.error = undefined;
+}
+
+export async function listMetas() {
   await mkdir(RUNS_DIR, { recursive: true });
   const ids = await readdir(RUNS_DIR);
   const metas = await Promise.all(
@@ -129,6 +134,11 @@ async function listMetas() {
     }),
   );
   return metas.filter((meta): meta is RunMeta => Boolean(meta));
+}
+
+async function assertCapacity() {
+  const running = (await listMetas()).filter((item) => item.status === "running").length;
+  if (running >= MAX_RUNNING) throw new RunError(`最多同时跑 ${MAX_RUNNING} 个任务`, 429);
 }
 
 export async function listRuns() {
@@ -174,6 +184,7 @@ async function createRun(input: Omit<CreateRunInput, "agents"> & { agent: AgentK
   const id = newId();
   const worktree = path.join(TREES_DIR, `${repo.name}-${id}`);
   const shown = agentArgs(input.agent, input.mode, TASK_PLACEHOLDER, worktree);
+  const now = Date.now();
   const meta: RunMeta = {
     id,
     agent: input.agent,
@@ -182,22 +193,18 @@ async function createRun(input: Omit<CreateRunInput, "agents"> & { agent: AgentK
     repoName: repo.name,
     task,
     status: "pending",
-    createdAt: Date.now(),
+    createdAt: now,
     worktree,
     branch: `alchemy/${id}`,
     command: [path.basename(bin), ...(task ? shown : shown.filter((arg) => arg !== TASK_PLACEHOLDER))],
     nonce: randomBytes(16).toString("hex"),
     groupId: input.groupId,
+    round: 1,
+    rounds: [{ message: task, startedAt: now }],
   };
   await mkdir(runDir(id), { recursive: true });
   await writeMeta(meta);
   return { run: publicRun(meta), nonce: meta.nonce! };
-}
-
-function sameToken(a: string, b: string) {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 /** 第二步凭口令启动，口令用一次就作废。 */
@@ -207,45 +214,51 @@ export async function startRun(id: string, nonce: string) {
   if (Date.now() - meta.createdAt > PENDING_TTL_MS) throw new RunError("确认已过期，请重新提交", 410);
   if (!sameToken(meta.nonce, nonce)) throw new RunError("确认口令不对", 403);
   meta.nonce = undefined;
-
-  const running = (await listMetas()).filter((item) => item.status === "running").length;
-  if (running >= MAX_RUNNING) {
+  try {
+    await assertCapacity();
+  } catch (error) {
     await writeMeta(meta);
-    throw new RunError(`最多同时跑 ${MAX_RUNNING} 个任务`, 429);
+    throw error;
   }
 
-  const bin = agentBin(meta.agent);
-  const worktree = meta.worktree!;
   try {
-    if (!bin) throw new Error("没有找到这个 Agent 的命令行");
     meta.baseCommit = (await git(meta.repo, ["rev-parse", "HEAD"])).trim();
     await mkdir(TREES_DIR, { recursive: true });
-    await git(meta.repo, ["worktree", "add", "-b", meta.branch!, worktree, meta.baseCommit], 60_000);
-
-    const out = await open(runFile(id, "out.log"), "a");
-    const err = await open(runFile(id, "err.log"), "a");
-    const script = 'cd "$1" || exit 97; shift; "$@" </dev/null; echo $? > "$ALCHEMY_EXIT_FILE"';
-    const child = spawn(
-      "/bin/sh",
-      ["-c", script, "alchemy-run", worktree, bin, ...agentArgs(meta.agent, meta.mode, meta.task, worktree)],
-      {
-        detached: true,
-        stdio: ["ignore", out.fd, err.fd],
-        env: agentEnv({ ALCHEMY_EXIT_FILE: runFile(id, "exit_code"), NO_COLOR: "1" }),
-      },
-    );
-    child.unref();
-    await Promise.all([out.close(), err.close()]);
-    if (!child.pid) throw new Error("进程没有启动");
-
-    meta.pid = child.pid;
-    meta.status = "running";
+    await git(meta.repo, ["worktree", "add", "-b", meta.branch!, meta.worktree!, meta.baseCommit], 60_000);
+    await spawnRound(meta, agentArgs(meta.agent, meta.mode, meta.task, meta.worktree!));
     meta.startedAt = Date.now();
+    meta.rounds[0].startedAt = meta.startedAt;
   } catch (error) {
     meta.status = "failed";
     meta.endedAt = Date.now();
     meta.error = error instanceof Error ? error.message : String(error);
   }
+  await writeMeta(meta);
+  return publicRun(meta);
+}
+
+/**
+ * 在同一个工作树、同一个会话上再跑一轮。启动时已经确认过这个 Agent 在这个工作树里写代码，
+ * 追问不再要口令；跨站请求由 proxy 挡掉。
+ */
+export async function continueRun(id: string, message: string) {
+  const meta = await refresh(await readMeta(id));
+  const text = message.trim();
+  if (!text) throw new RunError("请写下要继续做什么");
+  if (text.length > 20_000) throw new RunError("内容太长");
+  if (!isFinishedMeta(meta)) throw new RunError("任务还在运行，或者已经合并、丢弃", 409);
+  if (meta.mode === "review") throw new RunError("审查模式不能继续追问", 409);
+  if (!meta.worktree || !existsSync(meta.worktree)) throw new RunError("工作树已经不在了", 404);
+  await assertCapacity();
+
+  stopChecks(meta);
+  const round = meta.round + 1;
+  await appendFile(runFile(id, "out.log"), `${JSON.stringify({ type: "alchemy_round", round, text })}\n`);
+  await spawnRound(meta, agentArgs(meta.agent, meta.mode, text, meta.worktree, meta.sessionId));
+  meta.round = round;
+  meta.rounds.push({ message: text, startedAt: Date.now() });
+  meta.checks = undefined;
+  meta.checksPid = undefined;
   await writeMeta(meta);
   return publicRun(meta);
 }
@@ -275,6 +288,10 @@ async function tail(file: string, bytes: number) {
 
 export async function getRun(id: string, offset: number): Promise<RunDetail> {
   const meta = await refresh(await readMeta(id));
+  if (isFinishedMeta(meta) && !meta.sessionId) {
+    meta.sessionId = await findSessionId(id);
+    if (meta.sessionId) await updateMeta(id, (m) => (m.sessionId = meta.sessionId));
+  }
   const log = await readFrom(runFile(id, "out.log"), offset, LOG_CHUNK);
   const detail: RunDetail = {
     run: publicRun(meta),
@@ -282,11 +299,12 @@ export async function getRun(id: string, offset: number): Promise<RunDetail> {
     offset: log.offset,
     stderr: await tail(runFile(id, "err.log"), 4096),
   };
-  const finished = meta.status !== "running" && meta.status !== "pending" && meta.status !== "discarded";
-  if (finished && meta.worktree && meta.baseCommit && existsSync(meta.worktree)) {
+  if (isFinishedMeta(meta) && meta.worktree && meta.baseCommit && existsSync(meta.worktree)) {
     try {
       detail.changes = await diffChanges(meta.worktree, meta.baseCommit);
     } catch {}
+    detail.checkOutputs = await checkOutputs(meta);
+    detail.review = await readReview(meta);
   }
   return detail;
 }
@@ -303,7 +321,12 @@ export async function cancelRun(id: string) {
 }
 
 async function removeWorktree(meta: RunMeta) {
+  stopChecks(meta);
   if (meta.worktree && existsSync(meta.worktree)) {
+    const modules = path.join(meta.worktree, "node_modules");
+    try {
+      if ((await lstat(modules)).isSymbolicLink()) await unlink(modules);
+    } catch {}
     await git(meta.repo, ["worktree", "remove", "--force", meta.worktree], 60_000);
   }
   if (meta.baseCommit && meta.branch) {
@@ -325,11 +348,9 @@ export async function discardRun(id: string) {
   return publicRun(meta);
 }
 
-const MERGEABLE = new Set(["done", "failed", "cancelled", "lost"]);
-
 /** 合并前的检查：工作树还在、有改动、原仓库干净且停在某个分支上。 */
 async function mergeChecks(meta: RunMeta) {
-  if (!MERGEABLE.has(meta.status)) throw new RunError("任务还没结束，或者已经处理过了", 409);
+  if (!isFinishedMeta(meta)) throw new RunError("任务还没结束，或者已经处理过了", 409);
   if (!meta.worktree || !meta.baseCommit || !existsSync(meta.worktree)) {
     throw new RunError("工作树已经不在了", 404);
   }
@@ -348,8 +369,7 @@ async function mergeChecks(meta: RunMeta) {
 
 function defaultMessage(meta: RunMeta) {
   const firstLine = meta.task.split("\n")[0].trim() || MODE_LABELS[meta.mode];
-  const subject = firstLine.length > 72 ? `${firstLine.slice(0, 71)}…` : firstLine;
-  return subject;
+  return firstLine.length > 72 ? `${firstLine.slice(0, 71)}…` : firstLine;
 }
 
 export async function prepareMerge(id: string): Promise<MergePreview> {
@@ -358,7 +378,17 @@ export async function prepareMerge(id: string): Promise<MergePreview> {
   meta.mergeNonce = randomBytes(16).toString("hex");
   meta.mergeNonceAt = Date.now();
   await writeMeta(meta);
-  return { ...checks, message: defaultMessage(meta), nonce: meta.mergeNonce };
+  const current = meta.checks?.round === meta.round ? meta.checks : undefined;
+  return { ...checks, checks: current, message: defaultMessage(meta), nonce: meta.mergeNonce };
+}
+
+/** 检查跑完且通过（或没什么可查）才放行；没通过要明确勾选「仍然合并」。 */
+function assertChecks(meta: RunMeta, allowFailedChecks: boolean) {
+  const checks = meta.checks?.round === meta.round ? meta.checks : undefined;
+  if (!checks || checks.status === "running") throw new RunError("检查还没跑完，稍等再合并", 409);
+  if ((checks.status === "failed" || checks.status === "blocked") && !allowFailedChecks) {
+    throw new RunError(checks.status === "failed" ? "检查没通过" : "检查还没跑，等你确认", 412);
+  }
 }
 
 async function conflictedFiles(repo: string) {
@@ -373,11 +403,12 @@ async function conflictedFiles(repo: string) {
  * 在工作树里提交 Agent 的改动，再把基线之后的提交按顺序 cherry-pick 到原仓库当前分支。
  * 冲突就整体回滚，原仓库保持原样。
  */
-export async function mergeRun(id: string, nonce: string, message: string) {
+export async function mergeRun(id: string, nonce: string, message: string, allowFailedChecks = false) {
   const meta = await refresh(await readMeta(id));
   if (!meta.mergeNonce || !meta.mergeNonceAt) throw new RunError("请先预检再合并", 409);
   if (Date.now() - meta.mergeNonceAt > PENDING_TTL_MS) throw new RunError("确认已过期，请重新合并", 410);
   if (!sameToken(meta.mergeNonce, nonce)) throw new RunError("确认口令不对", 403);
+  assertChecks(meta, allowFailedChecks);
   meta.mergeNonce = undefined;
   meta.mergeNonceAt = undefined;
   await writeMeta(meta);
@@ -428,3 +459,5 @@ export async function runFilePath(id: string, file?: string) {
   if (!target.startsWith(meta.worktree + path.sep)) throw new RunError("文件不在工作树里", 403);
   return target;
 }
+
+export type { AgentRun };

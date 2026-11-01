@@ -53,6 +53,15 @@ export async function findRepo(repoPath: string) {
   return (await listRepos()).find((repo) => repo.path === repoPath);
 }
 
+export async function isIgnored(worktree: string, file: string) {
+  try {
+    await git(worktree, ["check-ignore", "--quiet", file]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 相对基线提交的全部改动，包括 Agent 自己提交的和还没跟踪的新文件。 */
 export async function diffChanges(worktree: string, base: string): Promise<FileChange[]> {
   await git(worktree, ["add", "--all", "--intent-to-add"]);

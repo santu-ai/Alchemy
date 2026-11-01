@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   AGENT_LABELS,
@@ -34,7 +35,7 @@ import { sendJson } from "@/lib/client/agents";
 import { useApi } from "@/lib/client/use-api";
 import { cn } from "@/lib/utils";
 import { ComparePanel } from "./compare-panel";
-import { isFinished, RunPanel, StatusBadge, useRunDetail, type RunActions } from "./run-panel";
+import { isFinished, RunPanel, runVersion, StatusBadge, useRunDetail, type RunActions } from "./run-panel";
 
 const BOTH = "both";
 const AGENT_ORDER: AgentKind[] = ["cursor", "junie"];
@@ -73,6 +74,18 @@ interface Merging {
   message: string;
   /** 并排时另一边，合并后一起丢弃。 */
   rivals: AgentRun[];
+  allowFailedChecks: boolean;
+}
+
+function checksNote(checks: MergePreview["checks"]) {
+  if (!checks || checks.status === "running") return { blocking: true, text: "检查还没跑完，稍等再合并。" };
+  if (checks.status === "passed") return { blocking: false, text: "类型检查和 lint 都通过了。" };
+  if (checks.status === "none") return { blocking: false, text: "" };
+  if (checks.status === "blocked") {
+    return { blocking: false, risky: true, text: `检查还没跑：Agent 改了 ${checks.blockedBy?.join("、")}，在任务详情里确认后再跑。` };
+  }
+  const failed = checks.items.filter((item) => item.exitCode !== 0).map((item) => item.name);
+  return { blocking: false, risky: true, text: `检查没通过：${failed.join("、")}。` };
 }
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -108,8 +121,8 @@ export function AgentsView() {
   const currentIde = ides.find((item) => item.id === ide) ?? ides[0];
 
   const entry = entries.find((item) => item.key === selected) ?? entries[0];
-  const left = useRunDetail(entry?.runs[0]?.id, entry?.runs[0]?.status, refreshRuns);
-  const right = useRunDetail(entry?.runs[1]?.id, entry?.runs[1]?.status, refreshRuns);
+  const left = useRunDetail(entry?.runs[0]?.id, runVersion(entry?.runs[0]), refreshRuns);
+  const right = useRunDetail(entry?.runs[1]?.id, runVersion(entry?.runs[1]), refreshRuns);
   const views = [left, right].filter((view): view is NonNullable<typeof view> => Boolean(view));
 
   const canSubmit =
@@ -180,9 +193,20 @@ export function AgentsView() {
       if (!run) return;
       try {
         const { preview } = await sendJson<{ preview: MergePreview }>(`/api/agents/runs/${runId}/merge`, "POST");
-        setMerging({ run, preview, message: preview.message, rivals: rivalsOf(runId) });
+        setMerging({ run, preview, message: preview.message, rivals: rivalsOf(runId), allowFailedChecks: false });
       } catch (error) {
         toast.error(`没法合并：${errorText(error)}`);
+      }
+    },
+    runChecks: (runId) => act("运行检查", () => sendJson(`/api/agents/runs/${runId}/checks`, "POST")),
+    continue: async (runId, message) => {
+      try {
+        await sendJson(`/api/agents/runs/${runId}/continue`, "POST", { message });
+        refreshRuns();
+        return true;
+      } catch (error) {
+        toast.error(`继续失败：${errorText(error)}`);
+        return false;
       }
     },
   };
@@ -205,6 +229,7 @@ export function AgentsView() {
       const { run } = await sendJson<{ run: AgentRun }>(`/api/agents/runs/${merging.run.id}/merge`, "POST", {
         nonce: merging.preview.nonce,
         message: merging.message,
+        allowFailedChecks: merging.allowFailedChecks,
       });
       await Promise.all(
         merging.rivals.map((rival) => sendJson(`/api/agents/runs/${rival.id}`, "DELETE").catch(() => undefined)),
@@ -227,6 +252,9 @@ export function AgentsView() {
       sendJson("/api/ide/open", "POST", { runId: left.run.id, against: right.run.id, ide: currentIde.id, file }),
     );
   };
+
+  const mergeNote = merging ? checksNote(merging.preview.checks) : undefined;
+  const mergeBlocked = Boolean(mergeNote?.blocking || (mergeNote?.risky && !merging?.allowFailedChecks));
 
   const isPair = (entry?.runs.length ?? 0) > 1;
   const bothFinished =
@@ -543,6 +571,20 @@ export function AgentsView() {
             />
             <p className="text-xs text-muted-foreground">第一行是标题，末尾会自动加上 Alchemy-Run 标记，方便以后追溯。</p>
           </div>
+          {mergeNote?.text && (
+            <div className="flex flex-col gap-2">
+              <p className={cn("text-sm", mergeNote.risky ? "text-warning" : "text-muted-foreground")}>{mergeNote.text}</p>
+              {mergeNote.risky && (
+                <Label className="flex items-center gap-2 text-sm font-normal">
+                  <Switch
+                    checked={merging?.allowFailedChecks ?? false}
+                    onCheckedChange={(checked) => setMerging((prev) => prev && { ...prev, allowFailedChecks: checked })}
+                  />
+                  仍然合并
+                </Label>
+              )}
+            </div>
+          )}
           {merging && merging.run.status !== "done" && (
             <p className="text-sm text-warning">这个任务没有正常结束（{STATUS_LABELS[merging.run.status]}），改动可能不完整。</p>
           )}
@@ -555,7 +597,7 @@ export function AgentsView() {
             <Button variant="outline" disabled={busy} onClick={() => setMerging(undefined)}>
               取消
             </Button>
-            <Button disabled={busy || !merging?.message.trim()} onClick={confirmMerge}>
+            <Button disabled={busy || !merging?.message.trim() || mergeBlocked} onClick={confirmMerge}>
               {busy ? <Loader2Icon className="animate-spin" /> : <GitMergeIcon />}
               合并
             </Button>

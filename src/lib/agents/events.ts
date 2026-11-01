@@ -1,4 +1,4 @@
-export type LogEventKind = "text" | "tool" | "result" | "error" | "info";
+export type LogEventKind = "text" | "tool" | "result" | "error" | "info" | "round";
 
 export interface LogEvent {
   kind: LogEventKind;
@@ -64,6 +64,10 @@ function parseEvent(line: string): LogEvent | undefined {
   const type = typeof event.type === "string" ? event.type : "";
   const subtype = typeof event.subtype === "string" ? event.subtype : "";
 
+  if (type === "alchemy_round") {
+    const text = typeof event.text === "string" ? event.text : "";
+    return { kind: "round", text: `第 ${Number(event.round) || "?"} 轮 · ${text}` };
+  }
   if (type === "assistant" && isObject(event.message)) {
     const text = contentText(event.message.content);
     return text.trim() ? { kind: "text", text } : undefined;

@@ -28,6 +28,7 @@ import {
   type RunStatus,
 } from "@/lib/agents/types";
 import { cn } from "@/lib/utils";
+import { ChecksSection, ContinueBox, currentChecks, ReviewSection } from "./run-extras";
 
 const MAX_EVENTS = 2000;
 
@@ -63,11 +64,19 @@ export function StatusBadge({ status }: { status: RunStatus }) {
   );
 }
 
+/** 跑完了但检查还没出结果，要接着轮询。 */
+const awaitingChecks = (run: AgentRun) =>
+  isFinished(run) && run.status !== "cancelled" && currentChecks(run)?.status !== "none" &&
+  (!currentChecks(run) || currentChecks(run)?.status === "running");
+
 /**
  * 轮询日志文件；进程独立于页面，刷新或重启服务都能接着看。
- * 结束后就不再轮询，列表里的状态变了（停止、丢弃）再重新拉一次。
+ * 结束且检查出结果后就不再轮询，列表里的状态变了（停止、丢弃、继续）再重新拉一次。
  */
-export function useRunDetail(id: string | undefined, status: RunStatus | undefined, onSettled: () => void) {
+export const runVersion = (run: AgentRun | undefined) =>
+  run && `${run.status}:${run.round}:${currentChecks(run)?.status ?? ""}`;
+
+export function useRunDetail(id: string | undefined, version: string | undefined, onSettled: () => void) {
   const [detail, setDetail] = useState<RunView>();
   const settledRef = useRef(onSettled);
   useEffect(() => {
@@ -99,10 +108,18 @@ export function useRunDetail(id: string | undefined, status: RunStatus | undefin
           .filter((event): event is LogEvent => Boolean(event));
         if (fresh.length) events = [...events, ...fresh].slice(-MAX_EVENTS);
 
-        setDetail({ run: data.run, stderr: data.stderr, changes: data.changes, events });
+        setDetail({
+          run: data.run,
+          stderr: data.stderr,
+          changes: data.changes,
+          checkOutputs: data.checkOutputs,
+          review: data.review,
+          events,
+        });
         if (wasRunning && !running) settledRef.current();
         wasRunning = running;
-        if (running || data.log.length > 0) timer = setTimeout(poll, running ? 1500 : 200);
+        if (running || (data.log.length === 0 && awaitingChecks(data.run))) timer = setTimeout(poll, 1500);
+        else if (data.log.length > 0) timer = setTimeout(poll, 200);
       } catch (error) {
         if (!cancelled) toast.error(error instanceof Error ? error.message : String(error));
       }
@@ -112,13 +129,21 @@ export function useRunDetail(id: string | undefined, status: RunStatus | undefin
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [id, status]);
+  }, [id, version]);
 
   return detail?.run.id === id ? detail : undefined;
 }
 
 function EventLine({ event }: { event: LogEvent }) {
   if (event.kind === "text") return <Markdown>{event.text}</Markdown>;
+  if (event.kind === "round") {
+    return (
+      <p className="mt-2 border-t pt-3 text-sm font-medium whitespace-pre-wrap">
+        <span className="text-muted-foreground">你 · </span>
+        {event.text}
+      </p>
+    );
+  }
   if (event.kind === "result") {
     return (
       <div className="rounded-md bg-muted px-3 py-2">
@@ -178,6 +203,9 @@ export interface RunActions {
   cancel: (runId: string) => void;
   discard: (runId: string) => void;
   merge: (runId: string) => void;
+  runChecks: (runId: string) => Promise<void>;
+  /** 返回是否已经发出去，成功才清空输入框。 */
+  continue: (runId: string, message: string) => Promise<boolean>;
   /** 并排对比时保留这一边，丢弃另一边。 */
   keep?: (runId: string) => void;
 }
@@ -215,6 +243,7 @@ export function RunPanel({
             <span className="text-sm font-medium">
               {AGENT_LABELS[run.agent]} · {MODE_LABELS[run.mode]}
             </span>
+            {run.round > 1 && <span className="text-xs text-muted-foreground">第 {run.round} 轮</span>}
             <span className="text-xs text-muted-foreground">{elapsed(run)}</span>
           </div>
           {run.status === "merged" ? (
@@ -302,10 +331,20 @@ export function RunPanel({
           {detail.changes.length > 0 && run.branch && isFinished(run) && (
             <p className="text-xs text-muted-foreground">
               「合并」会把这些改动提交后 cherry-pick 到原仓库当前分支；想先细看，可以在 IDE 的 Git 面板里对比{" "}
-              <code className="font-mono">{run.branch}</code>。
+              <code className="font-mono">{run.branch}</code>              。
             </p>
           )}
         </div>
+      )}
+
+      {hasTree && (detail.changes?.length ?? 0) > 0 && (
+        <>
+          <ChecksSection run={run} outputs={detail.checkOutputs} onRun={() => actions.runChecks(run.id)} />
+          <ReviewSection key={`${run.id}-${run.round}`} run={run} saved={detail.review} />
+        </>
+      )}
+      {hasTree && run.mode !== "review" && (
+        <ContinueBox run={run} onContinue={(message) => actions.continue(run.id, message)} />
       )}
     </div>
   );

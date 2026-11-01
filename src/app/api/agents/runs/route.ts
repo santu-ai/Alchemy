@@ -3,9 +3,11 @@ import { connection } from "next/server";
 import type { AgentKind, RunMode } from "@/lib/agents/types";
 import { noStore, runFailure } from "@/lib/server/agents/respond";
 import { createRuns, listRuns } from "@/lib/server/agents/runs";
+import { ensureWatcher } from "@/lib/server/agents/watcher";
 
 export async function GET() {
   await connection();
+  ensureWatcher();
   try {
     return noStore({ runs: await listRuns() });
   } catch (error) {

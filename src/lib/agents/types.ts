@@ -70,11 +70,59 @@ export interface AgentRun {
   groupId?: string;
   mergedInto?: string;
   mergedCommit?: string;
+  /** 第几轮，「继续」一次加一轮。 */
+  round: number;
+  rounds: RunRound[];
+  /** 能接着原会话继续（拿到了 Agent 的会话编号）。 */
+  resumable: boolean;
+  checks?: RunChecks;
+}
+
+export interface RunRound {
+  message: string;
+  startedAt: number;
+  endedAt?: number;
+  exitCode?: number;
+}
+
+/**
+ * none：没有改动或仓库没有检查脚本；blocked：Agent 改了会执行代码的配置，要你点了才跑。
+ */
+export type CheckStatus = "running" | "passed" | "failed" | "blocked" | "none";
+
+export interface CheckItem {
+  name: string;
+  command: string;
+  exitCode?: number;
+  durationMs?: number;
+}
+
+export interface RunChecks {
+  round: number;
+  status: CheckStatus;
+  items: CheckItem[];
+  /** 让检查停下来等确认的文件。 */
+  blockedBy?: string[];
+  startedAt?: number;
+  endedAt?: number;
+}
+
+export interface CheckOutput {
+  name: string;
+  output: string;
+}
+
+export interface RunReview {
+  round: number;
+  model: string;
+  text: string;
+  at: number;
 }
 
 export interface MergePreview {
   /** 原仓库当前所在的分支，改动会 cherry-pick 到这里。 */
   target: string;
+  checks?: RunChecks;
   files: FileChange[];
   /** Agent 自己已经做了的提交数，会和未提交的改动一起带过去。 */
   agentCommits: number;
@@ -102,6 +150,10 @@ export interface RunDetail {
   offset: number;
   stderr: string;
   changes?: FileChange[];
+  /** 当前轮检查的输出尾部。 */
+  checkOutputs?: CheckOutput[];
+  /** 当前轮的本地审查，换轮后作废。 */
+  review?: RunReview;
 }
 
 export const AGENT_LABELS: Record<AgentKind, string> = {
