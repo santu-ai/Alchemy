@@ -43,8 +43,14 @@ function toolSummary(event: Json) {
   return target ? `${label} · ${target}` : label;
 }
 
-/** 把 Cursor 的 stream-json 和 Junie 的 json-stream 都压成一行能读的事件。 */
-export function parseLogLine(line: string): LogEvent | undefined {
+/** 把 Cursor 的 stream-json 和 Junie 的 json-stream 都压成一行能读的事件；root 是工作树，路径里去掉它。 */
+export function parseLogLine(line: string, root?: string): LogEvent | undefined {
+  const event = parseEvent(line);
+  if (!event || !root) return event;
+  return { ...event, text: event.text.replaceAll(`${root}/`, "") };
+}
+
+function parseEvent(line: string): LogEvent | undefined {
   const trimmed = line.trim();
   if (!trimmed) return undefined;
   let event: unknown;
@@ -73,6 +79,9 @@ export function parseLogLine(line: string): LogEvent | undefined {
   if (type === "tool_call" || type.includes("tool")) {
     if (subtype === "completed") return undefined;
     return { kind: "tool", text: toolSummary(event) };
+  }
+  if (type === "result" && typeof event.duration_ms === "number" && !event.is_error) {
+    return { kind: "info", text: `完成 · ${Math.round(event.duration_ms / 1000)} 秒` };
   }
   if (type === "result") {
     const text = typeof event.result === "string" ? event.result : firstText(event) ?? "完成";

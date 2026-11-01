@@ -91,7 +91,9 @@ export function useRunDetail(id: string | undefined, status: RunStatus | undefin
         const running = data.run.status === "running";
         const lines = (partial + data.log).split("\n");
         partial = running ? (lines.pop() ?? "") : "";
-        const fresh = lines.map(parseLogLine).filter((event): event is LogEvent => Boolean(event));
+        const fresh = lines
+          .map((line) => parseLogLine(line, data.run.worktree))
+          .filter((event): event is LogEvent => Boolean(event));
         if (fresh.length) events = [...events, ...fresh].slice(-MAX_EVENTS);
 
         setDetail({ run: data.run, stderr: data.stderr, changes: data.changes, events });
