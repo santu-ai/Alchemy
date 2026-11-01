@@ -9,6 +9,7 @@
 - **模型对比**：同一个问题同时发给 2–3 个模型，显示首字延迟、生成速度（tokens/s）和总耗时，自动标出最快的。
 - **模型管理**：推荐模型一键下载并显示进度，查看已安装模型的大小与量化方式，从内存卸载或从磁盘删除。
 - **云端模型**：OpenAI、Anthropic、DeepSeek、通义千问、OpenRouter，以及任意 OpenAI 兼容接口。API Key 只在本机服务端使用，不会发给浏览器。
+- **Agent 工作台**：把编码任务派给 Cursor 或 Junie Agent，在独立工作树里并排跑、对比结果，再合并回当前分支。
 - 没有任何模型时，可以先用内置的**演示模型**体验界面。
 
 ## 在 Mac 上运行
@@ -44,6 +45,10 @@ cp .env.example .env.local   # setup 脚本已自动创建
 ```
 
 在 `.env.local` 里填写需要的 Key，例如 `DEEPSEEK_API_KEY=sk-...`，然后重启 `pnpm dev`。模型列表会自动从服务商拉取；想只显示几个模型，可以设置 `DEEPSEEK_MODELS=deepseek-chat,deepseek-reasoner` 这类变量。完整说明见 `.env.example`。
+
+## Agent 工作台（可选）
+
+需要先安装并登录 Cursor CLI（`cursor-agent login`）或 Junie CLI。只有当前项目和 `ALCHEMY_REPOS` 里列出的仓库可以派任务；每个任务在 `~/.alchemy/worktrees` 下的独立工作树和分支里运行，可以同时开两个 Agent 并排比较，结束后可在页面上合并到当前分支。任务代码会发送到 Cursor 或 JetBrains 的云端模型。
 
 ## 本地模型选择参考
 
