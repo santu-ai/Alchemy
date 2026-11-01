@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import {
+  BotIcon,
   BoxesIcon,
   ColumnsIcon,
   LayoutDashboardIcon,
@@ -26,6 +27,7 @@ const NAV = [
   { href: "/chat", label: "对话", icon: MessageSquareIcon },
   { href: "/compare", label: "模型对比", icon: ColumnsIcon },
   { href: "/models", label: "模型管理", icon: BoxesIcon },
+  { href: "/agents", label: "Agent", icon: BotIcon },
 ] as const;
 
 function isActive(pathname: string, href: string) {
