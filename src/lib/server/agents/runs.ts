@@ -8,8 +8,10 @@ import path from "node:path";
 
 import {
   AGENT_LABELS,
+  MODE_LABELS,
   type AgentKind,
   type AgentRun,
+  type MergePreview,
   type PendingRun,
   type RunDetail,
   type RunMode,
@@ -21,6 +23,8 @@ interface RunMeta extends AgentRun {
   nonce?: string;
   pid?: number;
   cancelRequested?: boolean;
+  mergeNonce?: string;
+  mergeNonceAt?: number;
 }
 
 const RUNS_DIR = path.join(ALCHEMY_HOME, "runs");
@@ -51,6 +55,8 @@ function publicRun(meta: RunMeta): AgentRun {
   delete run.nonce;
   delete run.pid;
   delete run.cancelRequested;
+  delete run.mergeNonce;
+  delete run.mergeNonceAt;
   return run as AgentRun;
 }
 
@@ -296,10 +302,7 @@ export async function cancelRun(id: string) {
   return publicRun(meta);
 }
 
-/** 删掉工作树和分支。要保留改动就别丢弃，去 IDE 里合并 alchemy/<编号> 分支。 */
-export async function discardRun(id: string) {
-  const meta = await refresh(await readMeta(id));
-  if (meta.status === "running") throw new RunError("先停止任务再丢弃", 409);
+async function removeWorktree(meta: RunMeta) {
   if (meta.worktree && existsSync(meta.worktree)) {
     await git(meta.repo, ["worktree", "remove", "--force", meta.worktree], 60_000);
   }
@@ -308,8 +311,111 @@ export async function discardRun(id: string) {
       await git(meta.repo, ["branch", "-D", meta.branch]);
     } catch {}
   }
+}
+
+/** 删掉工作树和分支，改动不要了。 */
+export async function discardRun(id: string) {
+  const meta = await refresh(await readMeta(id));
+  if (meta.status === "running") throw new RunError("先停止任务再丢弃", 409);
+  if (meta.status === "merged") throw new RunError("已经合并过了", 409);
+  await removeWorktree(meta);
   meta.status = "discarded";
   meta.nonce = undefined;
+  await writeMeta(meta);
+  return publicRun(meta);
+}
+
+const MERGEABLE = new Set(["done", "failed", "cancelled", "lost"]);
+
+/** 合并前的检查：工作树还在、有改动、原仓库干净且停在某个分支上。 */
+async function mergeChecks(meta: RunMeta) {
+  if (!MERGEABLE.has(meta.status)) throw new RunError("任务还没结束，或者已经处理过了", 409);
+  if (!meta.worktree || !meta.baseCommit || !existsSync(meta.worktree)) {
+    throw new RunError("工作树已经不在了", 404);
+  }
+  const target = (await git(meta.repo, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim();
+  if (!target) throw new RunError("原仓库不在任何分支上（detached HEAD），先切到要合并的分支", 409);
+  const dirty = (await git(meta.repo, ["status", "--porcelain"])).trim();
+  if (dirty) {
+    const count = dirty.split("\n").length;
+    throw new RunError(`原仓库有 ${count} 处未提交的改动，先提交或暂存（git stash）再合并`, 409);
+  }
+  const files = await diffChanges(meta.worktree, meta.baseCommit);
+  if (files.length === 0) throw new RunError("工作树里没有改动，不需要合并", 409);
+  const agentCommits = Number((await git(meta.worktree, ["rev-list", "--count", `${meta.baseCommit}..HEAD`])).trim());
+  return { target, files, agentCommits };
+}
+
+function defaultMessage(meta: RunMeta) {
+  const firstLine = meta.task.split("\n")[0].trim() || MODE_LABELS[meta.mode];
+  const subject = firstLine.length > 72 ? `${firstLine.slice(0, 71)}…` : firstLine;
+  return subject;
+}
+
+export async function prepareMerge(id: string): Promise<MergePreview> {
+  const meta = await refresh(await readMeta(id));
+  const checks = await mergeChecks(meta);
+  meta.mergeNonce = randomBytes(16).toString("hex");
+  meta.mergeNonceAt = Date.now();
+  await writeMeta(meta);
+  return { ...checks, message: defaultMessage(meta), nonce: meta.mergeNonce };
+}
+
+async function conflictedFiles(repo: string) {
+  try {
+    return (await git(repo, ["diff", "--name-only", "--diff-filter=U"])).trim().split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 在工作树里提交 Agent 的改动，再把基线之后的提交按顺序 cherry-pick 到原仓库当前分支。
+ * 冲突就整体回滚，原仓库保持原样。
+ */
+export async function mergeRun(id: string, nonce: string, message: string) {
+  const meta = await refresh(await readMeta(id));
+  if (!meta.mergeNonce || !meta.mergeNonceAt) throw new RunError("请先预检再合并", 409);
+  if (Date.now() - meta.mergeNonceAt > PENDING_TTL_MS) throw new RunError("确认已过期，请重新合并", 410);
+  if (!sameToken(meta.mergeNonce, nonce)) throw new RunError("确认口令不对", 403);
+  meta.mergeNonce = undefined;
+  meta.mergeNonceAt = undefined;
+  await writeMeta(meta);
+
+  const subject = message.trim().split("\n")[0] || defaultMessage(meta);
+  const body = message.trim().split("\n").slice(1).join("\n").trim();
+  const trailer = `Alchemy-Run: ${meta.id} (${AGENT_LABELS[meta.agent]})`;
+  const fullMessage = [subject, body, trailer].filter(Boolean).join("\n\n");
+
+  const { target } = await mergeChecks(meta);
+  const worktree = meta.worktree!;
+  await git(worktree, ["add", "--all"]);
+  const staged = (await git(worktree, ["diff", "--cached", "--name-only"])).trim();
+  if (staged) await git(worktree, ["commit", "--quiet", "-m", fullMessage], 120_000);
+
+  const commits = (await git(worktree, ["rev-list", "--reverse", `${meta.baseCommit}..HEAD`]))
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  if (commits.length === 0) throw new RunError("没有可合并的提交", 409);
+
+  try {
+    await git(meta.repo, ["cherry-pick", ...commits], 120_000);
+  } catch (error) {
+    const conflicts = await conflictedFiles(meta.repo);
+    try {
+      await git(meta.repo, ["cherry-pick", "--abort"]);
+    } catch {}
+    const detail = conflicts.length
+      ? `和 ${target} 上的改动冲突：${conflicts.join("、")}。已回滚，原仓库没有变化；可以在 IDE 里手动合并 ${meta.branch}`
+      : `cherry-pick 失败，已回滚：${error instanceof Error ? error.message : String(error)}`;
+    throw new RunError(detail, 409);
+  }
+
+  meta.mergedInto = target;
+  meta.mergedCommit = (await git(meta.repo, ["rev-parse", "HEAD"])).trim();
+  await removeWorktree(meta);
+  meta.status = "merged";
   await writeMeta(meta);
   return publicRun(meta);
 }

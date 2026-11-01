@@ -3,7 +3,15 @@ export type AgentKind = "cursor" | "junie";
 /** edit 会改代码；plan 和 review 只读。 */
 export type RunMode = "edit" | "plan" | "review";
 
-export type RunStatus = "pending" | "running" | "done" | "failed" | "cancelled" | "lost" | "discarded";
+export type RunStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled"
+  | "lost"
+  | "discarded"
+  | "merged";
 
 export type IdeId = "webstorm" | "idea" | "pycharm";
 
@@ -60,6 +68,18 @@ export interface AgentRun {
   error?: string;
   /** 同一个任务派给多个 Agent 时共用，页面上并排显示。 */
   groupId?: string;
+  mergedInto?: string;
+  mergedCommit?: string;
+}
+
+export interface MergePreview {
+  /** 原仓库当前所在的分支，改动会 cherry-pick 到这里。 */
+  target: string;
+  files: FileChange[];
+  /** Agent 自己已经做了的提交数，会和未提交的改动一起带过去。 */
+  agentCommits: number;
+  message: string;
+  nonce: string;
 }
 
 export interface PendingRun {
@@ -103,4 +123,5 @@ export const STATUS_LABELS: Record<RunStatus, string> = {
   cancelled: "已停止",
   lost: "进程已丢失",
   discarded: "已丢弃",
+  merged: "已合并",
 };

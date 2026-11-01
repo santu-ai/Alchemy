@@ -6,6 +6,7 @@ import {
   FileCodeIcon,
   FolderOpenIcon,
   GitBranchIcon,
+  GitMergeIcon,
   Loader2Icon,
   SquareIcon,
   Trash2Icon,
@@ -40,6 +41,7 @@ const STATUS_VARIANT: Record<RunStatus, "default" | "secondary" | "destructive" 
   cancelled: "outline",
   lost: "destructive",
   discarded: "outline",
+  merged: "secondary",
 };
 
 export function elapsed(run: AgentRun) {
@@ -48,8 +50,9 @@ export function elapsed(run: AgentRun) {
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 
+/** 跑完了、工作树还在，可以看改动、对比、合并。 */
 export const isFinished = (run: AgentRun) =>
-  run.status !== "running" && run.status !== "pending" && run.status !== "discarded";
+  run.status !== "running" && run.status !== "pending" && run.status !== "discarded" && run.status !== "merged";
 
 export function StatusBadge({ status }: { status: RunStatus }) {
   return (
@@ -174,6 +177,7 @@ export interface RunActions {
   open: (runId: string, change?: FileChange) => void;
   cancel: (runId: string) => void;
   discard: (runId: string) => void;
+  merge: (runId: string) => void;
   /** 并排对比时保留这一边，丢弃另一边。 */
   keep?: (runId: string) => void;
 }
@@ -183,11 +187,14 @@ export function RunPanel({
   ide,
   actions,
   showTask = true,
+  mergeTarget,
 }: {
   detail: RunView;
   ide?: IdeInfo;
   actions: RunActions;
   showTask?: boolean;
+  /** 原仓库当前分支，合并按钮上显示。 */
+  mergeTarget?: string;
 }) {
   const { run } = detail;
   const logRef = useRef<HTMLDivElement>(null);
@@ -196,7 +203,8 @@ export function RunPanel({
     if (el) el.scrollTop = el.scrollHeight;
   }, [detail.events.length]);
 
-  const hasTree = Boolean(run.worktree) && run.status !== "pending" && run.status !== "discarded";
+  const hasTree = Boolean(run.worktree) && run.status !== "pending" && isFinished(run);
+  const canMerge = isFinished(run) && (detail.changes?.length ?? 0) > 0;
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
@@ -209,14 +217,28 @@ export function RunPanel({
             </span>
             <span className="text-xs text-muted-foreground">{elapsed(run)}</span>
           </div>
-          {run.branch && run.status !== "discarded" && (
-            <span className="flex items-center gap-1 font-mono text-xs text-muted-foreground">
-              <GitBranchIcon className="size-3" />
-              {run.branch}
+          {run.status === "merged" ? (
+            <span className="flex items-center gap-1 font-mono text-xs text-success">
+              <GitMergeIcon className="size-3" />
+              已合并到 {run.mergedInto} · {run.mergedCommit?.slice(0, 7)}
             </span>
+          ) : (
+            run.branch &&
+            run.status !== "discarded" && (
+              <span className="flex items-center gap-1 font-mono text-xs text-muted-foreground">
+                <GitBranchIcon className="size-3" />
+                {run.branch}
+              </span>
+            )
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
+          {canMerge && (
+            <Button size="sm" onClick={() => actions.merge(run.id)}>
+              <GitMergeIcon />
+              合并到 {mergeTarget ?? "当前分支"}
+            </Button>
+          )}
           {actions.keep && isFinished(run) && (
             <Button variant="outline" size="sm" onClick={() => actions.keep?.(run.id)}>
               <CheckIcon />
@@ -235,7 +257,7 @@ export function RunPanel({
               停止
             </Button>
           ) : (
-            run.status !== "discarded" && (
+            isFinished(run) && (
               <Button variant="ghost" size="sm" onClick={() => actions.discard(run.id)}>
                 <Trash2Icon />
                 丢弃
@@ -277,10 +299,10 @@ export function RunPanel({
             onOpen={(change) => actions.open(run.id, change)}
             canOpen={Boolean(ide)}
           />
-          {detail.changes.length > 0 && run.branch && (
+          {detail.changes.length > 0 && run.branch && isFinished(run) && (
             <p className="text-xs text-muted-foreground">
-              满意的话在原仓库里合并：<code className="font-mono">git merge {run.branch}</code>
-              ，或者在 IDE 的 Git 面板里对比这个分支。
+              「合并」会把这些改动提交后 cherry-pick 到原仓库当前分支；想先细看，可以在 IDE 的 Git 面板里对比{" "}
+              <code className="font-mono">{run.branch}</code>。
             </p>
           )}
         </div>

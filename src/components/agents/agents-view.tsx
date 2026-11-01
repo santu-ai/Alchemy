@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { CloudIcon, GitBranchIcon, Loader2Icon, PlayIcon } from "lucide-react";
+import { CloudIcon, GitBranchIcon, GitMergeIcon, Loader2Icon, PlayIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -20,11 +20,13 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   AGENT_LABELS,
   MODE_LABELS,
+  STATUS_LABELS,
   type AgentKind,
   type AgentRun,
   type AgentsResponse,
   type FileChange,
   type IdeId,
+  type MergePreview,
   type PendingRun,
   type RunMode,
 } from "@/lib/agents/types";
@@ -65,10 +67,18 @@ function groupRuns(runs: AgentRun[]): Entry[] {
   return entries;
 }
 
+interface Merging {
+  run: AgentRun;
+  preview: MergePreview;
+  message: string;
+  /** 并排时另一边，合并后一起丢弃。 */
+  rivals: AgentRun[];
+}
+
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 export function AgentsView() {
-  const { data: env, error: envError } = useApi<AgentsResponse>("/api/agents");
+  const { data: env, error: envError, refresh: refreshEnv } = useApi<AgentsResponse>("/api/agents");
   const { data: runsData, refresh: refreshRuns } = useApi<{ runs: AgentRun[] }>("/api/agents/runs", 4000);
   const entries = useMemo(() => groupRuns(runsData?.runs ?? []), [runsData]);
 
@@ -80,6 +90,7 @@ export function AgentsView() {
   const [pending, setPending] = useState<PendingRun[]>();
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string>();
+  const [merging, setMerging] = useState<Merging>();
 
   const repos = env?.repos ?? [];
   const agents = env?.agents ?? [];
@@ -164,13 +175,50 @@ export function AgentsView() {
     },
     cancel: (runId) => act("停止", () => sendJson(`/api/agents/runs/${runId}/cancel`, "POST")),
     discard: (runId) => act("丢弃", () => sendJson(`/api/agents/runs/${runId}`, "DELETE")),
+    merge: async (runId) => {
+      const run = entry?.runs.find((item) => item.id === runId);
+      if (!run) return;
+      try {
+        const { preview } = await sendJson<{ preview: MergePreview }>(`/api/agents/runs/${runId}/merge`, "POST");
+        setMerging({ run, preview, message: preview.message, rivals: rivalsOf(runId) });
+      } catch (error) {
+        toast.error(`没法合并：${errorText(error)}`);
+      }
+    },
   };
   const pairActions: RunActions = {
     ...actions,
     keep: (runId) => {
-      const others = entry?.runs.filter((run) => run.id !== runId && run.status !== "discarded") ?? [];
+      const others = rivalsOf(runId);
       act("丢弃另一边", () => Promise.all(others.map((run) => sendJson(`/api/agents/runs/${run.id}`, "DELETE"))));
     },
+  };
+
+  function rivalsOf(runId: string) {
+    return entry?.runs.filter((run) => run.id !== runId && isFinished(run)) ?? [];
+  }
+
+  const confirmMerge = async () => {
+    if (!merging) return;
+    setBusy(true);
+    try {
+      const { run } = await sendJson<{ run: AgentRun }>(`/api/agents/runs/${merging.run.id}/merge`, "POST", {
+        nonce: merging.preview.nonce,
+        message: merging.message,
+      });
+      await Promise.all(
+        merging.rivals.map((rival) => sendJson(`/api/agents/runs/${rival.id}`, "DELETE").catch(() => undefined)),
+      );
+      toast.success(`已合并到 ${run.mergedInto} · ${run.mergedCommit?.slice(0, 7)}`);
+      setMerging(undefined);
+    } catch (error) {
+      toast.error(errorText(error), { duration: 10_000 });
+      setMerging(undefined);
+    } finally {
+      setBusy(false);
+      refreshRuns();
+      refreshEnv();
+    }
   };
 
   const diff = (file: string) => {
@@ -402,9 +450,7 @@ export function AgentsView() {
 
                 <div className={cn("grid gap-6", isPair && "xl:grid-cols-2")}>
                   {views.map((view) => {
-                    const rivalAlive = views.some(
-                      (other) => other.run.id !== view.run.id && other.run.status !== "discarded",
-                    );
+                    const rivalAlive = views.some((other) => other.run.id !== view.run.id && isFinished(other.run));
                     return (
                       <RunPanel
                         key={view.run.id}
@@ -412,6 +458,7 @@ export function AgentsView() {
                         ide={currentIde}
                         actions={isPair && rivalAlive ? pairActions : actions}
                         showTask={false}
+                        mergeTarget={repos.find((item) => item.path === view.run.repo)?.branch}
                       />
                     );
                   })}
@@ -458,6 +505,59 @@ export function AgentsView() {
             <Button disabled={busy} onClick={confirm}>
               {busy ? <Loader2Icon className="animate-spin" /> : <PlayIcon />}
               启动
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(merging)} onOpenChange={(open) => !open && !busy && setMerging(undefined)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
+              合并到 {merging?.run.repoName} 的 {merging?.preview.target}
+            </DialogTitle>
+            <DialogDescription>
+              先在工作树里提交 {merging ? AGENT_LABELS[merging.run.agent] : ""} 的改动
+              {merging?.preview.agentCommits ? `（连同它自己做的 ${merging.preview.agentCommits} 个提交）` : ""}
+              ，再 cherry-pick 到 {merging?.preview.target}。有冲突会整体回滚，原仓库不变。
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="flex max-h-40 flex-col gap-1 overflow-y-auto rounded-lg border p-2 font-mono text-xs">
+            {merging?.preview.files.map((file) => (
+              <li key={file.path} className="flex justify-between gap-3">
+                <span className={cn("truncate", file.deleted && "line-through")}>{file.path}</span>
+                <span className="shrink-0">
+                  {file.added !== undefined && <span className="text-success">+{file.added}</span>}{" "}
+                  {file.removed !== undefined && <span className="text-destructive">−{file.removed}</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="merge-message">提交说明</Label>
+            <Textarea
+              id="merge-message"
+              value={merging?.message ?? ""}
+              onChange={(event) => setMerging((prev) => prev && { ...prev, message: event.target.value })}
+              className="min-h-16 font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">第一行是标题，末尾会自动加上 Alchemy-Run 标记，方便以后追溯。</p>
+          </div>
+          {merging && merging.run.status !== "done" && (
+            <p className="text-sm text-warning">这个任务没有正常结束（{STATUS_LABELS[merging.run.status]}），改动可能不完整。</p>
+          )}
+          {merging && merging.rivals.length > 0 && (
+            <p className="text-sm text-muted-foreground">
+              合并后会丢弃另一边（{merging.rivals.map((run) => AGENT_LABELS[run.agent]).join("、")}）的工作树和分支。
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => setMerging(undefined)}>
+              取消
+            </Button>
+            <Button disabled={busy || !merging?.message.trim()} onClick={confirmMerge}>
+              {busy ? <Loader2Icon className="animate-spin" /> : <GitMergeIcon />}
+              合并
             </Button>
           </DialogFooter>
         </DialogContent>
