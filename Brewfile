@@ -1,4 +1,3 @@
-brew "git"
 brew "gh"
 brew "uv"
 brew "fnm"

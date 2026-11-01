@@ -17,7 +17,10 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 step "安装命令行工具和 OrbStack（Brewfile）"
-brew bundle --file=Brewfile
+# --no-upgrade：只补装缺少的，不升级已装好的软件（升级 cask 可能卡在密码或大文件下载上）
+if ! brew bundle --file=Brewfile --no-upgrade; then
+  echo "部分软件没装上，可以稍后运行 brew bundle --file=Brewfile --verbose 查看原因。继续后面的步骤…"
+fi
 
 if ! command -v ollama >/dev/null 2>&1; then
   step "安装 Ollama"
