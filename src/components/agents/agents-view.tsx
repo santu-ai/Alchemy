@@ -1,21 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  CloudIcon,
-  FileCodeIcon,
-  FolderOpenIcon,
-  GitBranchIcon,
-  Loader2Icon,
-  PlayIcon,
-  SquareIcon,
-  Trash2Icon,
-} from "lucide-react";
+import { useMemo, useState } from "react";
+import { CloudIcon, GitBranchIcon, Loader2Icon, PlayIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,236 +17,132 @@ import {
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { parseLogLine, type LogEvent } from "@/lib/agents/events";
 import {
   AGENT_LABELS,
   MODE_LABELS,
-  STATUS_LABELS,
   type AgentKind,
   type AgentRun,
   type AgentsResponse,
   type FileChange,
   type IdeId,
-  type RunDetail,
+  type PendingRun,
   type RunMode,
-  type RunStatus,
 } from "@/lib/agents/types";
 import { sendJson } from "@/lib/client/agents";
 import { useApi } from "@/lib/client/use-api";
 import { cn } from "@/lib/utils";
+import { ComparePanel } from "./compare-panel";
+import { isFinished, RunPanel, StatusBadge, useRunDetail, type RunActions } from "./run-panel";
 
-const MAX_EVENTS = 2000;
+const BOTH = "both";
+const AGENT_ORDER: AgentKind[] = ["cursor", "junie"];
 
-const STATUS_VARIANT: Record<RunStatus, "default" | "secondary" | "destructive" | "outline"> = {
-  pending: "outline",
-  running: "default",
-  done: "secondary",
-  failed: "destructive",
-  cancelled: "outline",
-  lost: "destructive",
-  discarded: "outline",
-};
-
-function elapsed(run: AgentRun) {
-  if (!run.startedAt) return "";
-  const seconds = Math.round(((run.endedAt ?? Date.now()) - run.startedAt) / 1000);
-  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+interface Entry {
+  key: string;
+  runs: AgentRun[];
 }
 
-function StatusBadge({ status }: { status: RunStatus }) {
-  return (
-    <Badge variant={STATUS_VARIANT[status]}>
-      {status === "running" && <Loader2Icon className="animate-spin" />}
-      {STATUS_LABELS[status]}
-    </Badge>
-  );
-}
-
-interface Pending {
-  run: AgentRun;
-  nonce: string;
-}
-
-function useRunDetail(id: string | undefined, onSettled: () => void) {
-  const [detail, setDetail] = useState<Omit<RunDetail, "log" | "offset"> & { events: LogEvent[] }>();
-  const settledRef = useRef(onSettled);
-  useEffect(() => {
-    settledRef.current = onSettled;
-  });
-
-  useEffect(() => {
-    if (!id) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let offset = 0;
-    let partial = "";
-    let events: LogEvent[] = [];
-    let wasRunning = false;
-
-    const poll = async () => {
-      try {
-        const res = await fetch(`/api/agents/runs/${id}?offset=${offset}`, { cache: "no-store" });
-        const data = (await res.json()) as RunDetail & { error?: string };
-        if (cancelled) return;
-        if (!res.ok) throw new Error(data.error ?? `请求失败（${res.status}）`);
-
-        offset = data.offset;
-        const running = data.run.status === "running";
-        const lines = (partial + data.log).split("\n");
-        partial = running ? (lines.pop() ?? "") : "";
-        const fresh = lines.map(parseLogLine).filter((event): event is LogEvent => Boolean(event));
-        if (fresh.length) events = [...events, ...fresh].slice(-MAX_EVENTS);
-
-        setDetail({ run: data.run, stderr: data.stderr, changes: data.changes, events });
-        if (wasRunning && !running) settledRef.current();
-        wasRunning = running;
-        if (running || data.log.length > 0) timer = setTimeout(poll, running ? 1500 : 200);
-      } catch (error) {
-        if (!cancelled) toast.error(error instanceof Error ? error.message : String(error));
-      }
-    };
-    poll();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [id]);
-
-  return detail?.run.id === id ? detail : undefined;
-}
-
-function EventLine({ event }: { event: LogEvent }) {
-  if (event.kind === "text") return <Markdown>{event.text}</Markdown>;
-  if (event.kind === "result") {
-    return (
-      <div className="rounded-md bg-muted px-3 py-2">
-        <Markdown>{event.text}</Markdown>
-      </div>
-    );
+/** 并排派出的任务在列表里合成一项。 */
+function groupRuns(runs: AgentRun[]): Entry[] {
+  const entries: Entry[] = [];
+  const groups = new Map<string, Entry>();
+  for (const run of runs) {
+    if (!run.groupId) {
+      entries.push({ key: run.id, runs: [run] });
+      continue;
+    }
+    let entry = groups.get(run.groupId);
+    if (!entry) {
+      entry = { key: run.groupId, runs: [] };
+      groups.set(run.groupId, entry);
+      entries.push(entry);
+    }
+    entry.runs.push(run);
   }
-  return (
-    <p
-      className={cn(
-        "font-mono text-xs whitespace-pre-wrap",
-        event.kind === "tool" && "text-muted-foreground",
-        event.kind === "info" && "text-muted-foreground/70",
-        event.kind === "error" && "text-destructive",
-      )}
-    >
-      {event.kind === "tool" ? `› ${event.text}` : event.text}
-    </p>
-  );
+  for (const entry of groups.values()) {
+    entry.runs.sort((a, b) => AGENT_ORDER.indexOf(a.agent) - AGENT_ORDER.indexOf(b.agent));
+  }
+  return entries;
 }
 
-function ChangeList({
-  changes,
-  onOpen,
-  ideLabel,
-}: {
-  changes: FileChange[];
-  onOpen: (change: FileChange) => void;
-  ideLabel?: string;
-}) {
-  if (!changes.length) return <p className="text-sm text-muted-foreground">工作树里没有改动。</p>;
-  return (
-    <ul className="flex flex-col divide-y rounded-lg border">
-      {changes.map((change) => (
-        <li key={change.path} className="flex items-center gap-3 px-3 py-2 text-sm">
-          <FileCodeIcon className="size-4 shrink-0 text-muted-foreground" />
-          <span className={cn("min-w-0 flex-1 truncate font-mono text-xs", change.deleted && "line-through")}>
-            {change.path}
-          </span>
-          <span className="shrink-0 font-mono text-xs">
-            {change.added !== undefined && <span className="text-success">+{change.added}</span>}{" "}
-            {change.removed !== undefined && <span className="text-destructive">−{change.removed}</span>}
-          </span>
-          <Button
-            variant="ghost"
-            size="xs"
-            disabled={change.deleted || !ideLabel}
-            onClick={() => onOpen(change)}
-          >
-            {change.line ? `第 ${change.line} 行` : "打开"}
-          </Button>
-        </li>
-      ))}
-    </ul>
-  );
-}
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 export function AgentsView() {
   const { data: env, error: envError } = useApi<AgentsResponse>("/api/agents");
   const { data: runsData, refresh: refreshRuns } = useApi<{ runs: AgentRun[] }>("/api/agents/runs", 4000);
-  const runs = useMemo(() => runsData?.runs ?? [], [runsData]);
+  const entries = useMemo(() => groupRuns(runsData?.runs ?? []), [runsData]);
 
   const [repo, setRepo] = useState<string>();
-  const [agent, setAgent] = useState<AgentKind>();
+  const [choice, setChoice] = useState<AgentKind | typeof BOTH>();
   const [mode, setMode] = useState<RunMode>("edit");
   const [task, setTask] = useState("");
   const [ide, setIde] = useState<IdeId>();
-  const [pending, setPending] = useState<Pending>();
+  const [pending, setPending] = useState<PendingRun[]>();
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string>();
 
   const repos = env?.repos ?? [];
   const agents = env?.agents ?? [];
+  const usable = agents.filter((item) => item.available && item.loggedIn !== false);
+  const canPair = usable.length >= 2;
   const ides = env?.ides.filter((item) => item.available) ?? [];
   const currentRepo = repos.find((item) => item.path === repo) ?? repos[0];
-  const currentAgent =
-    agents.find((item) => item.kind === agent) ??
-    agents.find((item) => item.available && item.loggedIn !== false) ??
-    agents.find((item) => item.available);
-  const modes = currentAgent?.modes ?? ["edit"];
+  const paired = choice === BOTH && canPair;
+  const currentAgent = paired
+    ? undefined
+    : (agents.find((item) => item.kind === choice) ?? usable[0] ?? agents.find((item) => item.available));
+  const chosen = paired ? usable : currentAgent ? [currentAgent] : [];
+  const modes: RunMode[] = paired ? ["edit"] : (currentAgent?.modes ?? ["edit"]);
   const currentMode = modes.includes(mode) ? mode : modes[0];
   const currentIde = ides.find((item) => item.id === ide) ?? ides[0];
-  const selectedId = selected ?? runs[0]?.id;
 
-  const detail = useRunDetail(selectedId, refreshRuns);
-  const logRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [detail?.events.length]);
+  const entry = entries.find((item) => item.key === selected) ?? entries[0];
+  const left = useRunDetail(entry?.runs[0]?.id, entry?.runs[0]?.status, refreshRuns);
+  const right = useRunDetail(entry?.runs[1]?.id, entry?.runs[1]?.status, refreshRuns);
+  const views = [left, right].filter((view): view is NonNullable<typeof view> => Boolean(view));
 
   const canSubmit =
-    Boolean(currentRepo && currentAgent?.available && currentAgent.loggedIn !== false) &&
+    Boolean(currentRepo) &&
+    chosen.length > 0 &&
+    chosen.every((item) => item.available && item.loggedIn !== false) &&
     (currentMode === "review" || task.trim().length > 0);
 
   const submit = async () => {
-    if (!currentRepo || !currentAgent || !canSubmit) return;
+    if (!currentRepo || !canSubmit) return;
     setBusy(true);
     try {
-      setPending(
-        await sendJson<Pending>("/api/agents/runs", "POST", {
-          agent: currentAgent.kind,
-          mode: currentMode,
-          repo: currentRepo.path,
-          task,
-        }),
-      );
+      const { runs } = await sendJson<{ runs: PendingRun[] }>("/api/agents/runs", "POST", {
+        agents: chosen.map((item) => item.kind),
+        mode: currentMode,
+        repo: currentRepo.path,
+        task,
+      });
+      setPending(runs);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
+      toast.error(errorText(error));
     } finally {
       setBusy(false);
     }
   };
 
   const confirm = async () => {
-    if (!pending) return;
+    if (!pending?.length) return;
     setBusy(true);
     try {
-      const { run } = await sendJson<{ run: AgentRun }>(`/api/agents/runs/${pending.run.id}/start`, "POST", {
-        nonce: pending.nonce,
-      });
-      if (run.status === "failed") toast.error(run.error ?? "启动失败");
-      setSelected(run.id);
+      for (const item of pending) {
+        const { run } = await sendJson<{ run: AgentRun }>(`/api/agents/runs/${item.run.id}/start`, "POST", {
+          nonce: item.nonce,
+        });
+        if (run.status === "failed") toast.error(`${AGENT_LABELS[run.agent]}：${run.error ?? "启动失败"}`);
+      }
+      setSelected(pending[0].run.groupId ?? pending[0].run.id);
       setTask("");
-      refreshRuns();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
+      toast.error(errorText(error));
     } finally {
       setBusy(false);
       setPending(undefined);
+      refreshRuns();
     }
   };
 
@@ -266,23 +151,38 @@ export function AgentsView() {
       await request();
       refreshRuns();
     } catch (error) {
-      toast.error(`${label}失败：${error instanceof Error ? error.message : String(error)}`);
+      toast.error(`${label}失败：${errorText(error)}`);
     }
   };
 
-  const openInIde = (file?: FileChange) => {
-    if (!detail || !currentIde) return;
-    act("打开", () =>
-      sendJson("/api/ide/open", "POST", {
-        runId: detail.run.id,
-        ide: currentIde.id,
-        file: file?.path,
-        line: file?.line,
-      }),
+  const actions: RunActions = {
+    open: (runId: string, change?: FileChange) => {
+      if (!currentIde) return;
+      act("打开", () =>
+        sendJson("/api/ide/open", "POST", { runId, ide: currentIde.id, file: change?.path, line: change?.line }),
+      );
+    },
+    cancel: (runId) => act("停止", () => sendJson(`/api/agents/runs/${runId}/cancel`, "POST")),
+    discard: (runId) => act("丢弃", () => sendJson(`/api/agents/runs/${runId}`, "DELETE")),
+  };
+  const pairActions: RunActions = {
+    ...actions,
+    keep: (runId) => {
+      const others = entry?.runs.filter((run) => run.id !== runId && run.status !== "discarded") ?? [];
+      act("丢弃另一边", () => Promise.all(others.map((run) => sendJson(`/api/agents/runs/${run.id}`, "DELETE"))));
+    },
+  };
+
+  const diff = (file: string) => {
+    if (!currentIde || !left || !right) return;
+    act("对比", () =>
+      sendJson("/api/ide/open", "POST", { runId: left.run.id, against: right.run.id, ide: currentIde.id, file }),
     );
   };
 
-  const run = detail?.run;
+  const isPair = (entry?.runs.length ?? 0) > 1;
+  const bothFinished =
+    isPair && left && right && isFinished(left.run) && isFinished(right.run) && left.changes && right.changes;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -290,8 +190,8 @@ export function AgentsView() {
         <div className="flex flex-col gap-1">
           <h1 className="text-xl font-semibold">Agent 工作台</h1>
           <p className="text-sm text-muted-foreground">
-            把编码任务交给 Cursor CLI 或 Junie CLI。每个任务在独立的 git 工作树和分支里跑，不碰你正在改的目录；结束后列出改动，一键在
-            JetBrains IDE 里打开到对应行。
+            把编码任务交给 Cursor CLI 或 Junie CLI，也可以同时交给两个并排比较。每个任务在独立的 git
+            工作树和分支里跑，不碰你正在改的目录；结束后列出改动，一键在 JetBrains IDE 里打开到对应行。
           </p>
         </div>
 
@@ -335,9 +235,12 @@ export function AgentsView() {
             <div className="flex flex-col gap-2">
               <Label>Agent</Label>
               <Select
-                items={agents.map((item) => ({ value: item.kind, label: item.label }))}
-                value={currentAgent?.kind ?? null}
-                onValueChange={(value) => value && setAgent(value as AgentKind)}
+                items={[
+                  ...agents.map((item) => ({ value: item.kind, label: item.label })),
+                  { value: BOTH, label: "两个都派，并排比较" },
+                ]}
+                value={paired ? BOTH : (currentAgent?.kind ?? null)}
+                onValueChange={(value) => value && setChoice(value as AgentKind | typeof BOTH)}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder={env ? "没有找到 Agent" : "读取中…"} />
@@ -351,6 +254,10 @@ export function AgentsView() {
                       </span>
                     </SelectItem>
                   ))}
+                  <SelectItem value={BOTH} disabled={!canPair}>
+                    两个都派，并排比较
+                    {!canPair && <span className="text-muted-foreground">需要两个都能用</span>}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -382,7 +289,9 @@ export function AgentsView() {
                 {currentRepo.branch}
               </span>
               {currentRepo.dirty > 0 && (
-                <span className="text-warning">有 {currentRepo.dirty} 处未提交的改动，工作树从当前提交开始，不会带上它们</span>
+                <span className="text-warning">
+                  有 {currentRepo.dirty} 处未提交的改动，工作树从当前提交开始，不会带上它们
+                </span>
               )}
             </p>
           )}
@@ -391,6 +300,11 @@ export function AgentsView() {
               {currentAgent.loggedIn === false
                 ? `${currentAgent.label} 还没登录：${currentAgent.loginHint}。`
                 : `查不到 ${currentAgent.label} 的登录状态，跑不起来就${currentAgent.loginHint}。`}
+            </p>
+          )}
+          {paired && (
+            <p className="text-xs text-muted-foreground">
+              两个 Agent 各开一个工作树，从同一个提交开始做同一件事，结束后按文件对照。
             </p>
           )}
           <div className="flex flex-col gap-2">
@@ -413,7 +327,7 @@ export function AgentsView() {
           <div className="flex justify-end">
             <Button onClick={submit} disabled={!canSubmit || busy}>
               {busy && !pending ? <Loader2Icon className="animate-spin" /> : <PlayIcon />}
-              派任务
+              {paired ? "派给两个 Agent" : "派任务"}
             </Button>
           </div>
         </div>
@@ -421,136 +335,87 @@ export function AgentsView() {
         <div className="grid gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
           <div className="flex flex-col gap-2">
             <h2 className="text-sm font-medium">任务记录</h2>
-            {runs.length === 0 && <p className="text-sm text-muted-foreground">还没有派过任务。</p>}
+            {entries.length === 0 && <p className="text-sm text-muted-foreground">还没有派过任务。</p>}
             <ul className="flex flex-col gap-1.5">
-              {runs.map((item) => (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    onClick={() => setSelected(item.id)}
-                    className={cn(
-                      "flex w-full flex-col gap-1 rounded-lg border px-3 py-2 text-left text-sm transition-colors hover:bg-muted/60",
-                      item.id === selectedId && "border-ring bg-muted/60",
-                    )}
-                  >
-                    <span className="flex items-center justify-between gap-2">
+              {entries.map((item) => {
+                const first = item.runs[0];
+                return (
+                  <li key={item.key}>
+                    <button
+                      type="button"
+                      onClick={() => setSelected(item.key)}
+                      className={cn(
+                        "flex w-full flex-col gap-1.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors hover:bg-muted/60",
+                        item.key === entry?.key && "border-ring bg-muted/60",
+                      )}
+                    >
                       <span className="text-xs text-muted-foreground">
-                        {AGENT_LABELS[item.agent]} · {item.repoName}
+                        {item.runs.map((run) => AGENT_LABELS[run.agent]).join(" ⇄ ")} · {first.repoName}
                       </span>
-                      <StatusBadge status={item.status} />
-                    </span>
-                    <span className="line-clamp-2">{item.task || MODE_LABELS[item.mode]}</span>
-                  </button>
-                </li>
-              ))}
+                      <span className="line-clamp-2">{first.task || MODE_LABELS[first.mode]}</span>
+                      <span className="flex flex-wrap gap-1">
+                        {item.runs.map((run) => (
+                          <StatusBadge key={run.id} status={run.status} />
+                        ))}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </div>
 
-          <div className="flex min-w-0 flex-col gap-3 rounded-xl border bg-card p-4">
-            {!run ? (
+          <div className="flex min-w-0 flex-col gap-4 rounded-xl border bg-card p-4">
+            {views.length === 0 ? (
               <p className="text-sm text-muted-foreground">选一个任务查看日志和改动。</p>
             ) : (
               <>
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex min-w-0 flex-col gap-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <StatusBadge status={run.status} />
-                      <span className="text-sm font-medium">
-                        {AGENT_LABELS[run.agent]} · {MODE_LABELS[run.mode]}
-                      </span>
-                      <span className="text-xs text-muted-foreground">{elapsed(run)}</span>
-                    </div>
-                    {run.branch && run.status !== "discarded" && (
-                      <span className="flex items-center gap-1 font-mono text-xs text-muted-foreground">
-                        <GitBranchIcon className="size-3" />
-                        {run.branch}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {ides.length > 1 && (
-                      <Select
-                        items={ides.map((item) => ({ value: item.id, label: item.label }))}
-                        value={currentIde?.id ?? null}
-                        onValueChange={(value) => value && setIde(value as IdeId)}
-                      >
-                        <SelectTrigger size="sm">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {ides.map((item) => (
-                            <SelectItem key={item.id} value={item.id}>
-                              {item.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    )}
-                    {run.worktree && run.status !== "pending" && run.status !== "discarded" && (
-                      <Button variant="outline" size="sm" disabled={!currentIde} onClick={() => openInIde()}>
-                        <FolderOpenIcon />在 {currentIde?.label ?? "IDE"} 打开工作树
-                      </Button>
-                    )}
-                    {run.status === "running" ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => act("停止", () => sendJson(`/api/agents/runs/${run.id}/cancel`, "POST"))}
-                      >
-                        <SquareIcon />
-                        停止
-                      </Button>
-                    ) : (
-                      run.status !== "discarded" && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => act("丢弃", () => sendJson(`/api/agents/runs/${run.id}`, "DELETE"))}
-                        >
-                          <Trash2Icon />
-                          丢弃工作树
-                        </Button>
-                      )
-                    )}
-                  </div>
-                </div>
-
-                {run.task && <p className="rounded-lg bg-muted/50 px-3 py-2 text-sm whitespace-pre-wrap">{run.task}</p>}
-                {run.error && <p className="text-sm text-destructive">{run.error}</p>}
-
-                <div
-                  ref={logRef}
-                  className="flex max-h-[28rem] min-h-40 flex-col gap-2 overflow-y-auto rounded-lg border bg-background p-3 text-sm"
-                >
-                  {detail.events.length === 0 && (
-                    <p className="text-muted-foreground">{run.status === "running" ? "等待输出…" : "没有输出。"}</p>
+                  {views[0].run.task ? (
+                    <p className="min-w-0 flex-1 rounded-lg bg-muted/50 px-3 py-2 text-sm whitespace-pre-wrap">
+                      {views[0].run.task}
+                    </p>
+                  ) : (
+                    <span className="flex-1" />
                   )}
-                  {detail.events.map((event, index) => (
-                    <EventLine key={index} event={event} />
-                  ))}
+                  {ides.length > 1 && (
+                    <Select
+                      items={ides.map((item) => ({ value: item.id, label: item.label }))}
+                      value={currentIde?.id ?? null}
+                      onValueChange={(value) => value && setIde(value as IdeId)}
+                    >
+                      <SelectTrigger size="sm" aria-label="用哪个 IDE 打开">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {ides.map((item) => (
+                          <SelectItem key={item.id} value={item.id}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
                 </div>
 
-                {detail.stderr.trim() && run.status !== "running" && (
-                  <details className="text-xs">
-                    <summary className="cursor-pointer text-muted-foreground">错误输出</summary>
-                    <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-muted p-2 whitespace-pre-wrap">
-                      {detail.stderr}
-                    </pre>
-                  </details>
-                )}
+                {bothFinished && <ComparePanel left={left} right={right} ide={currentIde} onDiff={diff} />}
 
-                {detail.changes && (
-                  <div className="flex flex-col gap-2">
-                    <h3 className="text-sm font-medium">改动 · {detail.changes.length} 个文件</h3>
-                    <ChangeList changes={detail.changes} onOpen={openInIde} ideLabel={currentIde?.label} />
-                    {detail.changes.length > 0 && run.branch && (
-                      <p className="text-xs text-muted-foreground">
-                        满意的话在原仓库里合并：<code className="font-mono">git merge {run.branch}</code>
-                        ，或者在 IDE 的 Git 面板里对比这个分支。
-                      </p>
-                    )}
-                  </div>
-                )}
+                <div className={cn("grid gap-6", isPair && "xl:grid-cols-2")}>
+                  {views.map((view) => {
+                    const rivalAlive = views.some(
+                      (other) => other.run.id !== view.run.id && other.run.status !== "discarded",
+                    );
+                    return (
+                      <RunPanel
+                        key={view.run.id}
+                        detail={view}
+                        ide={currentIde}
+                        actions={isPair && rivalAlive ? pairActions : actions}
+                        showTask={false}
+                      />
+                    );
+                  })}
+                </div>
               </>
             )}
           </div>
@@ -562,16 +427,28 @@ export function AgentsView() {
           <DialogHeader>
             <DialogTitle>确认启动</DialogTitle>
             <DialogDescription>
-              会先从 {pending?.run.repoName} 的当前提交开一个工作树和分支 {pending?.run.branch}，再在里面运行下面的命令。
+              {pending && pending.length > 1
+                ? `会从 ${pending[0].run.repoName} 的当前提交给每个 Agent 各开一个工作树和分支，再分别运行下面的命令。`
+                : `会先从 ${pending?.[0]?.run.repoName ?? ""} 的当前提交开一个工作树和分支 ${pending?.[0]?.run.branch ?? ""}，再在里面运行下面的命令。`}
             </DialogDescription>
           </DialogHeader>
-          <pre className="max-h-48 overflow-auto rounded-lg bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all">
-            {pending?.run.command.join(" ")}
-          </pre>
-          {pending?.run.mode === "edit" && (
+          {pending?.map((item) => (
+            <div key={item.run.id} className="flex min-w-0 flex-col gap-1">
+              {pending.length > 1 && (
+                <span className="text-xs text-muted-foreground">
+                  {AGENT_LABELS[item.run.agent]} · {item.run.branch}
+                </span>
+              )}
+              <pre className="max-h-40 overflow-auto rounded-lg bg-muted p-3 font-mono text-xs break-all whitespace-pre-wrap">
+                {item.run.command.join(" ")}
+              </pre>
+            </div>
+          ))}
+          {pending?.[0]?.run.mode === "edit" && (
             <p className="text-sm text-muted-foreground">
               改代码模式会在工作树里写文件、跑命令。代码会发到{" "}
-              {pending.run.agent === "cursor" ? "Cursor" : "JetBrains"} 的云端模型。
+              {[...new Set(pending.map((item) => (item.run.agent === "cursor" ? "Cursor" : "JetBrains")))].join(" 和 ")}{" "}
+              的云端模型。
             </p>
           )}
           <DialogFooter>

@@ -6,7 +6,14 @@ import { existsSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { AGENT_LABELS, type AgentKind, type AgentRun, type RunDetail, type RunMode } from "@/lib/agents/types";
+import {
+  AGENT_LABELS,
+  type AgentKind,
+  type AgentRun,
+  type PendingRun,
+  type RunDetail,
+  type RunMode,
+} from "@/lib/agents/types";
 import { AGENT_MODES, ALCHEMY_HOME, agentBin, agentEnv, loggedIn } from "./env";
 import { diffChanges, findRepo, git } from "./git";
 
@@ -128,14 +135,26 @@ export async function listRuns() {
 }
 
 export interface CreateRunInput {
-  agent: AgentKind;
+  agents: AgentKind[];
   mode: RunMode;
   repo: string;
   task: string;
 }
 
-/** 第一步只登记任务、生成一次性口令，不启动任何进程。 */
-export async function createRun(input: CreateRunInput) {
+const newId = () => `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+
+/** 第一步只登记任务、生成一次性口令，不启动任何进程。多个 Agent 时每个一份。 */
+export async function createRuns(input: CreateRunInput): Promise<PendingRun[]> {
+  const agents = [...new Set(input.agents)];
+  if (agents.length === 0 || agents.length > 2) throw new RunError("一次最多派给两个 Agent");
+  if (agents.length > 1 && input.mode !== "edit") throw new RunError("并排对比只支持改代码模式");
+  const groupId = agents.length > 1 ? newId() : undefined;
+  const pending: PendingRun[] = [];
+  for (const agent of agents) pending.push(await createRun({ ...input, agent, groupId }));
+  return pending;
+}
+
+async function createRun(input: Omit<CreateRunInput, "agents"> & { agent: AgentKind; groupId?: string }) {
   if (!AGENT_MODES[input.agent]?.includes(input.mode)) throw new RunError("这个 Agent 不支持该模式");
   const bin = agentBin(input.agent);
   if (!bin) throw new RunError("没有找到这个 Agent 的命令行");
@@ -146,7 +165,7 @@ export async function createRun(input: CreateRunInput) {
   if (input.mode !== "review" && !task) throw new RunError("请写清楚任务");
   if (task.length > 20_000) throw new RunError("任务描述太长");
 
-  const id = `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+  const id = newId();
   const worktree = path.join(TREES_DIR, `${repo.name}-${id}`);
   const shown = agentArgs(input.agent, input.mode, TASK_PLACEHOLDER, worktree);
   const meta: RunMeta = {
@@ -162,6 +181,7 @@ export async function createRun(input: CreateRunInput) {
     branch: `alchemy/${id}`,
     command: [path.basename(bin), ...(task ? shown : shown.filter((arg) => arg !== TASK_PLACEHOLDER))],
     nonce: randomBytes(16).toString("hex"),
+    groupId: input.groupId,
   };
   await mkdir(runDir(id), { recursive: true });
   await writeMeta(meta);

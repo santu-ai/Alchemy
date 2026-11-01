@@ -58,6 +58,13 @@ export interface AgentRun {
   command: string[];
   exitCode?: number;
   error?: string;
+  /** 同一个任务派给多个 Agent 时共用，页面上并排显示。 */
+  groupId?: string;
+}
+
+export interface PendingRun {
+  run: AgentRun;
+  nonce: string;
 }
 
 export interface FileChange {

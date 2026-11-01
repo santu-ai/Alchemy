@@ -2,6 +2,7 @@ import "server-only";
 
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -133,6 +134,21 @@ export function ideLauncher(id: IdeId) {
     path.join(homedir(), "Library/Application Support/JetBrains/Toolbox/scripts", id),
     onPath(id),
   ]);
+}
+
+/**
+ * Toolbox 生成的脚本会给带空格的参数加上字面引号，路径里有空格就打不开。
+ * 能从脚本里读出程序位置时，直接用 open 启动并原样传参。
+ */
+export async function ideCommand(id: IdeId, args: string[]) {
+  const launcher = ideLauncher(id);
+  if (!launcher) return undefined;
+  try {
+    const script = await readFile(launcher, "utf8");
+    const app = /open -na "([^"]+)"/.exec(script)?.[1];
+    if (app && existsSync(app)) return { file: "open", args: ["-na", app, "--args", ...args] };
+  } catch {}
+  return { file: launcher, args };
 }
 
 export function isIdeId(value: unknown): value is IdeId {
