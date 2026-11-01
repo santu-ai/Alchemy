@@ -98,10 +98,11 @@ export async function loggedIn(kind: AgentKind, bin: string) {
   return value;
 }
 
-const LOGIN_HINTS: Record<AgentKind, string> = {
-  cursor: "在终端运行 cursor-agent login，或者在 .env.local 里设置 CURSOR_API_KEY，然后重启炼丹炉",
-  junie: "在终端运行一次 junie 完成登录，或者在 .env.local 里设置 JUNIE_API_KEY",
-};
+function loginHint(kind: AgentKind, bin: string | undefined) {
+  if (kind === "junie") return "在终端运行一次 junie 完成登录，或者在 .env.local 里设置 JUNIE_API_KEY";
+  const command = !bin || onPath("cursor-agent") ? "cursor-agent" : `"${bin}"`;
+  return `在终端运行 ${command} login，或者在 .env.local 里设置 CURSOR_API_KEY 后重启炼丹炉`;
+}
 
 export async function probeAgents(): Promise<AgentInfo[]> {
   const kinds: AgentKind[] = ["cursor", "junie"];
@@ -117,7 +118,7 @@ export async function probeAgents(): Promise<AgentInfo[]> {
         version,
         modes: AGENT_MODES[kind],
         loggedIn: login,
-        loginHint: LOGIN_HINTS[kind],
+        loginHint: loginHint(kind, bin),
       };
     }),
   );
