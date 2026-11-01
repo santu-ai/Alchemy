@@ -1,6 +1,6 @@
 "use client";
 
-import { CopyIcon, HistoryIcon, PlusIcon, RefreshCwIcon, SparklesIcon } from "lucide-react";
+import { CopyIcon, HistoryIcon, PlusIcon, RefreshCwIcon, FlameIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -223,7 +223,7 @@ export function ChatView() {
             {!messages || messages.length === 0 ? (
               <div className="flex flex-col items-center gap-6 pt-10 text-center sm:pt-16">
                 <span className="flex size-12 items-center justify-center rounded-2xl bg-brand/10 text-brand">
-                  <SparklesIcon className="size-6" />
+                  <FlameIcon className="size-6" />
                 </span>
                 <div className="flex flex-col gap-1.5">
                   <h1 className="text-xl font-semibold">今天想探索什么？</h1>

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 Mac 上一键准备 AI 工作台。可以重复运行，已装好的会跳过。
+# 在 Mac 上一键准备炼丹炉（Alchemy）。可以重复运行，已装好的会跳过。
 # 用法：bash scripts/setup-mac.sh [--with-models]
 set -euo pipefail
 cd "$(dirname "$0")/.."

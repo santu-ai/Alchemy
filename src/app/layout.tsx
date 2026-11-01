@@ -18,8 +18,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI 工作台",
-  description: "在自己的电脑上探索本地与云端大模型：对话、对比、管理模型。",
+  title: "炼丹炉 Alchemy",
+  description: "炼丹炉：在自己的电脑上探索本地与云端大模型，对话、对比、管理模型。",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

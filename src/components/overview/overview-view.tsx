@@ -147,7 +147,7 @@ export function OverviewView() {
           <Badge variant="secondary" className="w-fit">
             本地优先 · 数据不出电脑
           </Badge>
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">你的 AI 工作台</h1>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">炼丹炉 <span className="text-muted-foreground">Alchemy</span></h1>
           <p className="max-w-2xl text-sm text-muted-foreground sm:text-base">
             在这里试用本地和云端大模型、比较它们的表现，再把好用的组合变成你的产品。
           </p>

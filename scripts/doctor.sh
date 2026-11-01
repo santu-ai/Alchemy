@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AI 工作台体检：只读取信息，不修改任何东西。
+# 炼丹炉（Alchemy）体检：只读取信息，不修改任何东西。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -63,7 +63,7 @@ else
   note "Ollama 已安装但未运行，运行：open -a Ollama"
 fi
 
-section "AI 工作台项目"
+section "炼丹炉项目"
 if [[ -d node_modules ]]; then pass "依赖已安装"; else fail "依赖未安装，运行：pnpm install"; fi
 if [[ -f .env.local ]]; then
   configured=$(grep -E '^[A-Z_]+_API_KEY=.+' .env.local | cut -d= -f1 | tr '\n' ' ')

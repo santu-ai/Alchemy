@@ -1,6 +1,6 @@
-# AI 工作台
+# 炼丹炉 Alchemy
 
-一个运行在自己电脑上的 AI 实验室：和本地或云端大模型对话、把同一个问题发给多个模型对比、一键下载和管理本地模型。默认优先使用 [Ollama](https://ollama.com) 本地模型，对话内容不会离开你的电脑。
+炼丹炉是一个运行在自己电脑上的 AI 实验室：和本地或云端大模型对话、把同一个问题发给多个模型对比、一键下载和管理本地模型。默认优先使用 [Ollama](https://ollama.com) 本地模型，对话内容不会离开你的电脑。
 
 ## 功能
 
@@ -16,8 +16,8 @@
 需要 Homebrew。第一次运行：
 
 ```bash
-git clone <仓库地址> ai-workbench
-cd ai-workbench
+git clone https://github.com/santu-ai/Alchemy.git
+cd Alchemy
 bash scripts/setup-mac.sh            # 安装工具、依赖，创建 .env.local
 bash scripts/setup-mac.sh --with-models   # 同上，并下载 qwen3:8b 和 nomic-embed-text
 ```

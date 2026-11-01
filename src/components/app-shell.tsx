@@ -10,7 +10,7 @@ import {
   MenuIcon,
   MessageSquareIcon,
   MoonIcon,
-  SparklesIcon,
+  FlameIcon,
   SunIcon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -36,10 +36,10 @@ function Brand() {
   return (
     <Link href="/" className="flex items-center gap-2.5 px-2">
       <span className="flex size-8 items-center justify-center rounded-lg bg-brand text-brand-foreground shadow-sm">
-        <SparklesIcon className="size-4" />
+        <FlameIcon className="size-4" />
       </span>
       <span className="leading-tight">
-        <span className="block text-sm font-semibold">AI 工作台</span>
+        <span className="block text-sm font-semibold">炼丹炉 <span className="font-normal text-muted-foreground">Alchemy</span></span>
         <span className="block text-xs text-muted-foreground">本地优先的模型实验室</span>
       </span>
     </Link>
@@ -146,7 +146,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <SidebarBody onNavigate={() => setOpen(false)} />
             </SheetContent>
           </Sheet>
-          <span className="text-sm font-medium">{current?.label ?? "AI 工作台"}</span>
+          <span className="text-sm font-medium">{current?.label ?? "炼丹炉"}</span>
         </header>
         <main className="min-h-0 flex-1">{children}</main>
       </div>
